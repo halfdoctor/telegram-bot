@@ -1,7 +1,8 @@
-require('dotenv').config();
+require('dotenv').config({ path: __dirname + '/.env' });
 const { WebSocketProvider, Interface } = require('ethers');
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
+const { searchDeposit } = require('./scripts/search-deposit.js');
 
 // Supabase setup
 const supabase = createClient(
@@ -9,13 +10,31 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
+// Initialize web3
+const { Web3 } = require('web3');
+const fs = require('fs');
+
+// Load Escrow contract ABI
+const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
+
+// Create web3 instance with provider
+const web3 = new Web3(process.env.BASE_RPC);
+
+// Initialize escrow contract
+const escrowContract = new web3.eth.Contract(ESCROW_ABI, '0xca38607d85e8f6294dc10728669605e6664c2d70');
+
+// Export for use in search-deposit.js
+exports.web3 = web3;
+exports.escrowContract = escrowContract;
+
+const depositAmounts = new Map(); // Store deposit amounts temporarily
+const intentDetails = new Map();
+
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
 // Exchange rate API configuration
 const EXCHANGE_API_URL = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}/latest/USD`;
 
-const depositAmounts = new Map(); // Store deposit amounts temporarily
-const intentDetails = new Map();
 
 // Database helper functions
 class DatabaseManager {
@@ -2926,6 +2945,105 @@ process.on('unhandledRejection', (reason, promise) => {
 // Graceful shutdown handlers
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Telegram Bot Message Handlers
+bot.onText(/\/searchdeposit (\d+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const depositId = parseInt(match[1]);
+
+  try {
+    // Initialize user in database
+    await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
+
+    // Show typing indicator
+    await bot.sendChatAction(chatId, 'typing');
+
+    // Import search function
+    const { searchDeposit } = require('./scripts/search-deposit.js');
+
+    // Search for deposit
+    const result = await searchDeposit(depositId);
+
+    if (result.error) {
+      await bot.sendMessage(chatId, `❌ ${result.error}`);
+      return;
+    }
+
+    // if (result.token === '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913') {
+    //   resultToken = 'USDC';
+    //   return;
+    // }
+
+    // Format the response
+    let message = `🔍 **Deposit Search Results**\n\n`;
+    message += `📋 **Basic Information:**\n`;
+    message += `• Deposit ID: \`${result.depositId}\`\n`;
+    message += `• Depositor: \`${result.depositor}\`\n`;
+    message += `• Token: \`${result.token}\`\n`;
+    message += `• Amount: \`${formatUSDC(result.amount)}\` USDC\n`;
+    message += `• Status: ${result.status}\n\n`;
+
+    if (result.intents && result.intents.length > 0) {
+      message += `📝 **Associated Intents:**\n`;
+      result.intents.forEach((intent, index) => {
+        message += `• Intent ${index + 1}: \`${intent}\`\n`;
+      });
+      message += `\n`;
+    }
+
+    if (result.currencies && result.currencies.length > 0) {
+      message += `💱 **Supported Currencies:**\n`;
+      result.currencies.forEach(currency => {
+        const rate = (Number(currency.conversionRate) / 1e18).toFixed(6);
+        message += `• ${currency.code}: ${rate}\n`;
+      });
+      message += `\n`;
+    }
+
+    if (result.verificationData && result.verificationData.length > 0) {
+      message += `🔐 **Verification Data:**\n`;
+      result.verificationData.forEach((data, index) => {
+        message += `• Verifier ${index + 1}: \`${data.verifier}\`\n`;
+        message += `• Service: \`${data.intentGatingService}\`\n`;
+        if (data.payeeDetails) {
+          message += `• Payee: \`${data.payeeDetails}\`\n`;
+        }
+      });
+    }
+
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Error in search deposit command:', error);
+    await bot.sendMessage(chatId, `❌ Error searching deposit: ${error.message}`);
+  }
+});
+
+// Help command for search functionality
+bot.onText(/\/searchhelp/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const helpMessage = `
+🔍 **Deposit Search Help**
+
+**Commands:**
+• \`/searchdeposit <ID>\` - Search for a specific deposit by ID
+• \`/searchhelp\` - Show this help message
+
+**Example:**
+\`/searchdeposit 123\`
+
+**What you'll get:**
+• Deposit basic information (depositor, amount, status)
+• Associated intents
+• Supported currencies and conversion rates
+• Verification data
+
+**Note:** Only active deposits will return complete information.
+  `;
+
+  await bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
+});
 
 // Health check interval
 setInterval(async () => {
