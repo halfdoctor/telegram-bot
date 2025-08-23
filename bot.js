@@ -362,138 +362,138 @@ class DatabaseManager {
     };
   }
   
-async removeUserSniper(chatId, currency = null, platform = null) {
-  const now = new Date();
-  const timestamp = this._formatTimestamp(now);
+  async removeUserSniper(chatId, currency = null, platform = null) {
+    const now = new Date();
+    const timestamp = this._formatTimestamp(now);
 
-  let query = supabase
-    .from('user_snipers')
-    .update({
-      is_active: false,
-      updated_at: timestamp
-    })
-    .eq('chat_id', chatId);
+    let query = supabase
+      .from('user_snipers')
+      .update({
+        is_active: false,
+        updated_at: timestamp
+      })
+      .eq('chat_id', chatId);
 
-  if (currency) {
-    query = query.eq('currency', currency.toUpperCase());
-  }
-
-  if (platform) {
-    query = query.eq('platform', platform.toLowerCase());
-  }
-
-  const { error } = await query;
-  if (error) console.error('Error removing sniper:', error);
-}
-
-async setUserSniper(chatId, currency, platform = null) {
-  // Always insert - no deactivation needed
-  const now = new Date();
-  const timestamp = this._formatTimestamp(now);
-
-  // First, try to deactivate any existing snipers for this currency/platform combo
-  let deactivateQuery = supabase
-    .from('user_snipers')
-    .update({ is_active: false, updated_at: timestamp })
-    .eq('chat_id', chatId)
-    .eq('currency', currency.toUpperCase())
-    .eq('is_active', true);
-
-  if (platform !== null) {
-    deactivateQuery = deactivateQuery.eq('platform', platform.toLowerCase());
-  } else {
-    deactivateQuery = deactivateQuery.is('platform', null);
-  }
-
-  await deactivateQuery;
-
-  // Now insert the new sniper
-  const { error } = await supabase
-   .from('user_snipers')
-   .insert({
-     chat_id: chatId,
-     currency: currency.toUpperCase(),
-     platform: platform ? platform.toLowerCase() : null,
-     is_active: true,
-     created_at: timestamp,
-     updated_at: timestamp
-   });
-
- if (error) {
-   console.error('Error setting sniper:', error);
-   return false;
- }
- return true;
-}
-
-async getUserSnipers(chatId) {
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  // Format date to match PostgreSQL timestamp without time zone format
-  const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
-
-  const { data, error } = await supabase
-    .from('user_snipers')
-    .select('currency, platform, created_at')
-    .eq('chat_id', chatId)
-    .eq('is_active', true)
-    .gte('created_at', thirtyDaysAgoFormatted)
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error fetching user snipers:', error);
-    return [];
-  }
-
-  // Deduplicate - keep only the newest entry for each currency+platform combo
-  const unique = new Map();
-  data.forEach(row => {
-    const key = `${row.currency}-${row.platform ?? 'all'}`; // ← Add fallback for null
-    const existing = unique.get(key);
-    if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
-      unique.set(key, row);
+    if (currency) {
+      query = query.eq('currency', currency.toUpperCase());
     }
-  });
 
-  return Array.from(unique.values());
-}
+    if (platform) {
+      query = query.eq('platform', platform.toLowerCase());
+    }
+
+    const { error } = await query;
+    if (error) console.error('Error removing sniper:', error);
+  }
+
+  async setUserSniper(chatId, currency, platform = null) {
+    // Always insert - no deactivation needed
+    const now = new Date();
+    const timestamp = this._formatTimestamp(now);
+
+    // First, try to deactivate any existing snipers for this currency/platform combo
+    let deactivateQuery = supabase
+      .from('user_snipers')
+      .update({ is_active: false, updated_at: timestamp })
+      .eq('chat_id', chatId)
+      .eq('currency', currency.toUpperCase())
+      .eq('is_active', true);
+
+    if (platform !== null) {
+      deactivateQuery = deactivateQuery.eq('platform', platform.toLowerCase());
+    } else {
+      deactivateQuery = deactivateQuery.is('platform', null);
+    }
+
+    await deactivateQuery;
+
+    // Now insert the new sniper
+    const { error } = await supabase
+    .from('user_snipers')
+    .insert({
+      chat_id: chatId,
+      currency: currency.toUpperCase(),
+      platform: platform ? platform.toLowerCase() : null,
+      is_active: true,
+      created_at: timestamp,
+      updated_at: timestamp
+    });
+
+    if (error) {
+      console.error('Error setting sniper:', error);
+      return false;
+    }
+    return true;
+  }
+
+  async getUserSnipers(chatId) {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    // Format date to match PostgreSQL timestamp without time zone format
+    const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
+
+    const { data, error } = await supabase
+      .from('user_snipers')
+      .select('currency, platform, created_at')
+      .eq('chat_id', chatId)
+      .eq('is_active', true)
+      .gte('created_at', thirtyDaysAgoFormatted)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching user snipers:', error);
+      return [];
+    }
+
+    // Deduplicate - keep only the newest entry for each currency+platform combo
+    const unique = new Map();
+    data.forEach(row => {
+      const key = `${row.currency}-${row.platform ?? 'all'}`; // ← Add fallback for null
+      const existing = unique.get(key);
+      if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
+        unique.set(key, row);
+      }
+    });
+
+    return Array.from(unique.values());
+  }
 
   async getUsersWithSniper(currency, platform = null) {
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  // Format date to match PostgreSQL timestamp without time zone format
-  const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    // Format date to match PostgreSQL timestamp without time zone format
+    const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
 
-  let query = supabase
-    .from('user_snipers')
-    .select('chat_id, currency, platform, created_at')
-    .eq('currency', currency.toUpperCase())
-    .gte('created_at', thirtyDaysAgoFormatted);
+    let query = supabase
+      .from('user_snipers')
+      .select('chat_id, currency, platform, created_at')
+      .eq('currency', currency.toUpperCase())
+      .gte('created_at', thirtyDaysAgoFormatted);
 
-  // If platform is specified, match exactly OR get users with null platform (all platforms)
-  if (platform) {
-    // Get users who either specified this platform OR want all platforms (null)
-    query = query.or(`platform.eq.${platform.toLowerCase()},platform.is.null`);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    console.error('Error fetching users with sniper:', error);
-    return [];
-  }
-
-  // Deduplicate by chat_id - if user has multiple entries, keep the newest
-  const userMap = new Map();
-  data.forEach(row => {
-    const existing = userMap.get(row.chat_id);
-    if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
-      userMap.set(row.chat_id, row);
+    // If platform is specified, match exactly OR get users with null platform (all platforms)
+    if (platform) {
+      // Get users who either specified this platform OR want all platforms (null)
+      query = query.or(`platform.eq.${platform.toLowerCase()},platform.is.null`);
     }
-  });
 
-  return Array.from(userMap.keys()); // Return just the chat IDs
-}
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error fetching users with sniper:', error);
+      return [];
+    }
+
+    // Deduplicate by chat_id - if user has multiple entries, keep the newest
+    const userMap = new Map();
+    data.forEach(row => {
+      const existing = userMap.get(row.chat_id);
+      if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
+        userMap.set(row.chat_id, row);
+      }
+    });
+
+    return Array.from(userMap.keys()); // Return just the chat IDs
+  }
 
   async logSniperAlert(chatId, depositId, currency, depositRate, marketRate, percentageDiff) {
     const { error } = await supabase
@@ -512,124 +512,144 @@ async getUserSnipers(chatId) {
   }
 
   async storeDepositAmount(depositId, amount) {
-  // Validate inputs
-  if (!depositId || !amount) {
-    console.error('Error: Missing depositId or amount');
-    return false;
-  }
-
-  // Ensure depositId is a valid integer (for deposit_amounts table which uses bigint)
-  const depositIdInt = parseInt(depositId);
-  if (isNaN(depositIdInt) || depositIdInt <= 0) {
-    console.error('Error: Invalid depositId, must be a positive integer');
-    return false;
-  }
-
-  // Ensure amount is a valid number
-  const amountNum = Number(amount);
-  if (isNaN(amountNum) || amountNum <= 0) {
-    console.error('Error: Invalid amount, must be a positive number');
-    return false;
-  }
-
-  // Store in memory for quick access (keep original decimal value)
-  depositAmounts.set(depositIdInt, amountNum);
-
-  // Convert to integer for database storage (multiply by 100 to store cents)
-  // This is because the schema defines amount as bigint, not decimal
-  const amountInt = Math.round(amountNum * 100);
-
-  // Also store in database for persistence
-  const { data, error } = await supabase
-    .from('deposit_amounts')
-    .upsert({
-      deposit_id: depositIdInt,
-      amount: amountInt,
-      created_at: new Date().toISOString()
-    }, {
-      onConflict: 'deposit_id'
-    });
-
-    if (error) {
-      console.error('Error storing deposit amount:', error);
+    // Validate inputs
+    if (!depositId || !amount) {
+      console.error('Error: Missing depositId or amount');
       return false;
     }
 
-    console.log(`✅ Successfully stored amount ${amountNum} (as ${amountInt} cents) for deposit ${depositIdInt}`);
-    return true;
+    // Ensure depositId is a valid integer (for deposit_amounts table which uses bigint)
+    const depositIdInt = parseInt(depositId);
+    if (isNaN(depositIdInt) || depositIdInt <= 0) {
+      console.error('Error: Invalid depositId, must be a positive integer');
+      return false;
+    }
+
+    // Ensure amount is a valid number
+    const amountNum = Number(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      console.error('Error: Invalid amount, must be a positive number');
+      return false;
+    }
+
+    // Store in memory for quick access (keep original decimal value)
+    depositAmounts.set(depositIdInt, amountNum);
+
+    // Convert to integer for database storage (multiply by 100 to store cents)
+    // This is because the schema defines amount as bigint, not decimal
+    const amountInt = Math.round(amountNum * 100);
+
+    // Also store in database for persistence
+    const { data, error } = await supabase
+      .from('deposit_amounts')
+      .upsert({
+        deposit_id: depositIdInt,
+        amount: amountInt,
+        created_at: new Date().toISOString()
+      }, {
+        onConflict: 'deposit_id'
+      });
+
+      if (error) {
+        console.error('Error storing deposit amount:', error);
+        return false;
+      }
+
+      console.log(`✅ Successfully stored amount ${amountNum} (as ${amountInt} cents) for deposit ${depositIdInt}`);
+      return true;
   }
 
   async getDepositAmount(depositId) {
-  // Validate input
-  if (!depositId) {
-    console.error('Error: Missing depositId');
-    return 0;
-  }
-
-  // Ensure depositId is a valid integer
-  const depositIdInt = parseInt(depositId);
-  if (isNaN(depositIdInt) || depositIdInt <= 0) {
-    console.error('Error: Invalid depositId, must be a positive integer');
-    return 0;
-  }
-
-  // Try memory first
-  const memoryAmount = depositAmounts.get(depositIdInt);
-  if (memoryAmount !== undefined) return memoryAmount;
-
-  // Fall back to database
-    const { data, error } = await supabase
-      .from('deposit_amounts')
-      .select('amount')
-      .eq('deposit_id', depositIdInt)
-      .single();
-
-    if (error) {
-      if (error.code !== 'PGRST116') { // PGRST116 = no rows returned
-        console.error('Error getting deposit amount:', error);
-      }
+    // Validate input
+    if (!depositId) {
+      console.error('Error: Missing depositId');
       return 0;
     }
 
-    // Convert from cents back to decimal
-    const storedAmount = data?.amount || 0;
-    return storedAmount / 100;
-  }
-// Get user's global sniper threshold
-async getUserThreshold(chatId) {
-  const { data, error } = await supabase
-    .from('user_settings')
-    .select('threshold')
-    .eq('chat_id', chatId)
-    .eq('is_active', true)
-    .single();
-  
-  if (error && error.code !== 'PGRST116') {
-    console.error('Error getting user threshold:', error);
-  }
-  return data?.threshold || 0.2; // Default to 0.2% if not set
-}
+    // Ensure depositId is a valid integer
+    const depositIdInt = parseInt(depositId);
+    if (isNaN(depositIdInt) || depositIdInt <= 0) {
+      console.error('Error: Invalid depositId, must be a positive integer');
+      return 0;
+    }
 
-// Set user's global sniper threshold
-async setUserThreshold(chatId, threshold) {
-  const { error } = await supabase
-    .from('user_settings')
-    .upsert({ 
-      chat_id: chatId, 
-      threshold: threshold,
-      is_active: true,
-      updated_at: new Date().toISOString()
-    }, { 
-      onConflict: 'chat_id' 
-    });
+    // Try memory first
+    const memoryAmount = depositAmounts.get(depositIdInt);
+    if (memoryAmount !== undefined) return memoryAmount;
+
+    // Fall back to database
+      const { data, error } = await supabase
+        .from('deposit_amounts')
+        .select('amount')
+        .eq('deposit_id', depositIdInt)
+        .single();
+
+      if (error) {
+        if (error.code !== 'PGRST116') { // PGRST116 = no rows returned
+          console.error('Error getting deposit amount:', error);
+        }
+        return 0;
+      }
+
+      // Convert from cents back to decimal
+      const storedAmount = data?.amount || 0;
+      return storedAmount / 100;
+  }
   
-  if (error) console.error('Error setting user threshold:', error);
-}
+  // Get user's global sniper threshold
+  async getUserThreshold(chatId) {
+    const { data, error } = await supabase
+      .from('user_settings')
+      .select('threshold')
+      .eq('chat_id', chatId)
+      .eq('is_active', true)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error getting user threshold:', error);
+    }
+    return data?.threshold || 0.2; // Default to 0.2% if not set
+  }
+
+  // Set user's global sniper threshold
+  async setUserThreshold(chatId, threshold) {
+    const { error } = await supabase
+      .from('user_settings')
+      .upsert({ 
+        chat_id: chatId, 
+        threshold: threshold,
+        is_active: true,
+        updated_at: new Date().toISOString()
+      }, { 
+        onConflict: 'chat_id' 
+      });
+    
+    if (error) console.error('Error setting user threshold:', error);
+  }
   
 }
 
 
 const db = new DatabaseManager();
+
+// Helper functions for group chat restrictions
+function isGroupChat(chatType) {
+  return chatType === 'group' || chatType === 'supergroup';
+}
+
+async function isUserAdmin(bot, chatId, userId) {
+  try {
+    const member = await bot.getChatMember(chatId, userId);
+    return ['creator', 'administrator'].includes(member.status);
+  } catch (error) {
+    console.error('Error checking admin status:', error);
+    return false;
+  }
+}
+
+function getRestrictedMessage() {
+  return '❌ This command is restricted in group chats. You can get a personal bot by searching for @zkp2p_bot .';
+}
 
 const ZKP2P_GROUP_ID = -1001928949520;
 const ZKP2P_TOPIC_ID = 5385;
@@ -1416,12 +1436,24 @@ bot.onText(/\/deposit (.+)/, async (msg, match) => {
   await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
   
   if (input === 'all') {
+    // Check if this is a group chat and user is not admin
+    if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+      return;
+    }
+  
     await db.setUserListenAll(chatId, true);
     bot.sendMessage(chatId, `🌍 *Now listening to ALL deposits!*\n\nYou will receive notifications for every event on every deposit.\n\nUse \`/deposit stop\` to stop listening to all deposits.`, { parse_mode: 'Markdown' });
     return;
   }
   
   if (input === 'stop') {
+    // Check if this is a group chat and user is not admin
+    if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+      return;
+    }
+  
     await db.setUserListenAll(chatId, false);
     bot.sendMessage(chatId, `🛑 *Stopped listening to all deposits.*\n\nYou will now only receive notifications for specifically tracked deposits.`, { parse_mode: 'Markdown' });
     return;
@@ -1434,6 +1466,12 @@ bot.onText(/\/deposit (.+)/, async (msg, match) => {
     return;
   }
   
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
   for (const id of newIds) {
     await db.addUserDeposit(chatId, id);
   }
@@ -1453,6 +1491,12 @@ bot.onText(/\/remove (.+)/, async (msg, match) => {
     return;
   }
   
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
   for (const id of idsToRemove) {
     await db.removeUserDeposit(chatId, id);
   }
@@ -1475,6 +1519,13 @@ bot.onText(/\/list/, async (msg) => {
   const snipers = await db.getUserSnipers(chatId);
   
   let message = '';
+    
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
   
   if (listeningAll) {
     message += `🌍 *Listening to ALL deposits*\n\n`;
@@ -1511,6 +1562,13 @@ bot.onText(/\/list/, async (msg) => {
 
 bot.onText(/\/clearall/, async (msg) => {
   const chatId = msg.chat.id;
+
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
   await db.clearUserData(chatId);
   bot.sendMessage(chatId, `🗑️ Cleared all tracked deposit IDs, stopped listening to all deposits, and cleared all sniper settings.`, { parse_mode: 'Markdown' });
 });
@@ -1593,6 +1651,12 @@ bot.onText(/\/sniper threshold (.+)/, async (msg, match) => {
     return;
   }
   
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
   await db.setUserThreshold(chatId, threshold);
   
   bot.sendMessage(chatId, `🎯 *Sniper threshold set to ${threshold}%*\n\nYou'll now be alerted when deposits offer rates ${threshold}% or better than market rates.`, { parse_mode: 'Markdown' });
@@ -1645,6 +1709,12 @@ bot.onText(/\/sniper (?!threshold)(.+)/, async (msg, match) => {
     return;
   }
   
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+    return;
+  }
+
   await db.setUserSniper(chatId, currency, platform);
   
   const platformText = platform ? ` on ${platform}` : ' (all platforms)';
@@ -1660,6 +1730,12 @@ bot.onText(/\/unsnipe (.+)/, async (msg, match) => {
   const currency = parts[0].toUpperCase();
   const platform = parts[1] ? parts[1].toLowerCase() : null;
   
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+    return;
+  }
+
   await db.removeUserSniper(chatId, currency, platform);
   
   const platformText = platform ? ` on ${platform}` : ' (all platforms)';
@@ -2216,6 +2292,12 @@ Questions? The menu system makes everything easier! 🚀
     }
 
     else if (data === 'confirm_clearall_confirmed') {
+      // Check if this is a group chat and user is not admin
+      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+        return;
+      }
+  
       await db.clearUserData(chatId);
       await bot.editMessageText('🗑️ **All Data Cleared**\n\nCleared all tracked deposit IDs, stopped listening to all deposits, and cleared all sniper settings.\n\nYou can start fresh now!', {
         chat_id: chatId,
@@ -2637,7 +2719,7 @@ bot.on('message', async (msg) => {
   if (text?.startsWith('/') || userStates.has(chatId)) return;
   
   // Show menu if user sends common confused messages
-  const confusedPhrases = ['help', 'menu', 'what', 'how', '?', 'commands', 'start', 'hi', 'hello'];
+  const confusedPhrases = ['menu', '/', 'commands', 'start'];
   
   if (confusedPhrases.some(phrase => text?.includes(phrase))) {
     bot.sendMessage(chatId, '👋 **Need help?**\n\nUse the interactive menu below to easily navigate all features:', {
