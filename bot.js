@@ -5,16 +5,39 @@ const { searchDeposit } = require('./scripts/search-deposit.js');
 const DatabaseManager = require('./database-manager');
 const { supabase } = require('./config');
 const { getExchangeRates } = require('./exchange-service');
+const express = require('express');
 
 // Initialize ethers
 const { ethers } = require('ethers');
 const fs = require('fs');
 
-// Add this to your bot.js for the ping endpoint
-const express = require('express');
+// Add HTTP server for Render health checks
 const app = express();
-app.get('/ping', (req, res) => res.send('Bot is alive!'));
-app.listen(process.env.PORT || 3000);
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'Bot is running!', 
+    uptime: process.uptime(),
+    connected: resilientProvider?.isConnected || false
+  });
+});
+
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    websocket: resilientProvider?.isConnected ? 'connected' : 'disconnected',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 Health check server running on port ${PORT}`);
+});
 
 // Load Escrow contract ABI
 const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
