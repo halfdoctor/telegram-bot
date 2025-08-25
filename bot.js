@@ -39,18 +39,8 @@ app.listen(PORT, () => {
   console.log(`🌐 Health check server running on port ${PORT}`);
 });
 
-// Load Escrow contract ABI
-const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
-
-// Create ethers provider
-const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC);
-
-// Initialize escrow contract
-const escrowContract = new ethers.Contract('0xca38607d85e8f6294dc10728669605e6664c2d70', ESCROW_ABI, provider);
-
-// Export for use in search-deposit.js
-exports.provider = provider;
-exports.escrowContract = escrowContract;
+// Import provider and contract from config module
+const { provider, escrowContract } = require('./config.js');
 
 const depositAmounts = new Map(); // Store deposit amounts temporarily
 const intentDetails = new Map();
@@ -1165,6 +1155,9 @@ const createDepositMenu = () => {
         { text: '🛑 Stop Listening to All', callback_data: 'action_deposit_stop' }
       ],
       [
+        { text: '🔍 Search Specific Deposit', callback_data: 'prompt_deposit_search' }
+      ],
+      [
         { text: '➕ Track Specific Deposit', callback_data: 'prompt_deposit_add' }
       ],
       [
@@ -1314,7 +1307,7 @@ Choose an option below to begin:
 bot.onText(/\/menu/, (msg) => {
   const chatId = msg.chat.id;
   
-  bot.sendMessage(chatId, '📋 **Main Menu**\n\nChoose what you\'d like to do:', {
+  bot.sendMessage(chatId, '📋 **ZKP2P Monitoring Bot**\n\nHow may I assist you?', {
     parse_mode: 'Markdown',
     reply_markup: createMainMenu()
   });
@@ -1388,6 +1381,19 @@ bot.on('callback_query', async (callbackQuery) => {
       });
     }
 
+    else if (data === 'prompt_deposit_search') {
+      await bot.editMessageText('🔍 **Search info about a Deposit**\n\nUse the command below to search information about a specific deposit:\n\n`/searchdeposit <id>`\n\nExamples:\n• `/searchdeposit 123` - search for deposit 123\n\nReplace `<id>` with the actual deposit ID you want to review.', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '❌ Cancel', callback_data: 'menu_deposits' }
+          ]]
+        }
+      });
+    }
+
     // Handle prompts for user input
     else if (data === 'prompt_deposit_add') {
       userStates.set(chatId, { action: 'waiting_deposit_add', messageId });
@@ -1405,7 +1411,7 @@ bot.on('callback_query', async (callbackQuery) => {
     
     else if (data === 'prompt_deposit_remove') {
       userStates.set(chatId, { action: 'waiting_deposit_remove', messageId });
-      await bot.editMessageText('➖ **Remove Specific Deposit**\n\nPlease send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:', {
+      await bot.editMessageText('➖ **Remove Tracking**\n\nPlease send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:', {
         chat_id: chatId,
         message_id: messageId,
         parse_mode: 'Markdown',
@@ -2586,91 +2592,20 @@ bot.onText(/\/searchdeposit (\d+)/, async (msg, match) => {
     // Show typing indicator
     await bot.sendChatAction(chatId, 'typing');
 
-    // Import search function
-    const { searchDeposit } = require('./scripts/search-deposit.js');
+    // Import search and formatting functions
+    const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
 
     // Search for deposit
     const result = await searchDeposit(depositId);
 
-    if (result.error) {
-      await bot.sendMessage(chatId, `❌ ${result.error}`);
-      return;
-    }
-
-    // if (result.token === '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913') {
-    //   resultToken = 'USDC';
-    //   return;
-    // }
-
-    // Format the response
-    let message = `🔍 **Deposit Search Results**\n\n`;
-    message += `📋 **Basic Information:**\n`;
-    message += `• Deposit ID: \`${result.depositId}\`\n`;
-    message += `• Depositor: \`${result.depositor}\`\n`;
-    message += `• Token: \`${result.token}\`\n`;
-    message += `• Amount: \`${formatUSDC(result.amount)}\` USDC\n`;
-    message += `• Status: ${result.status}\n\n`;
-
-    if (result.intents && result.intents.length > 0) {
-      message += `📝 **Associated Intents:**\n`;
-      result.intents.forEach((intent, index) => {
-        message += `• Intent ${index + 1}: \`${intent}\`\n`;
-      });
-      message += `\n`;
-    }
-
-    if (result.currencies && result.currencies.length > 0) {
-      message += `💱 **Supported Currencies:**\n`;
-      result.currencies.forEach(currency => {
-        const rate = (Number(currency.conversionRate) / 1e18).toFixed(6);
-        message += `• ${currency.code}: ${rate}\n`;
-      });
-      message += `\n`;
-    }
-
-    if (result.verificationData && result.verificationData.length > 0) {
-      message += `🔐 **Verification Data:**\n`;
-      result.verificationData.forEach((data, index) => {
-        message += `• Verifier ${index + 1}: \`${data.verifier}\`\n`;
-        message += `• Service: \`${data.intentGatingService}\`\n`;
-        if (data.payeeDetails) {
-          message += `• Payee: \`${data.payeeDetails}\`\n`;
-        }
-      });
-    }
-
+    // Format and send the message
+    const message = formatTelegramMessage(result);
     await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 
   } catch (error) {
     console.error('Error in search deposit command:', error);
     await bot.sendMessage(chatId, `❌ Error searching deposit: ${error.message}`);
   }
-});
-
-// Help command for search functionality
-bot.onText(/\/searchhelp/, async (msg) => {
-  const chatId = msg.chat.id;
-
-  const helpMessage = `
-🔍 **Deposit Search Help**
-
-**Commands:**
-• \`/searchdeposit <ID>\` - Search for a specific deposit by ID
-• \`/searchhelp\` - Show this help message
-
-**Example:**
-\`/searchdeposit 123\`
-
-**What you'll get:**
-• Deposit basic information (depositor, amount, status)
-• Associated intents
-• Supported currencies and conversion rates
-• Verification data
-
-**Note:** Only active deposits will return complete information.
-  `;
-
-  await bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
 });
 
 // Health check interval
