@@ -1,34 +1,31 @@
 require('dotenv').config({ path: __dirname + '/../.env' });
-const { Web3 } = require('web3');
+const { ethers } = require('ethers');
 const fs = require('fs');
 
 // Load Escrow contract ABI
 const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../abi.js', 'utf8'));
 
-// Create web3 instance with provider
-const web3 = new Web3(process.env.BASE_RPC);
-
-// Initialize escrow contract
-const escrowContract = new web3.eth.Contract(ESCROW_ABI, '0xca38607d85e8f6294dc10728669605e6664c2d70');
+// Import provider and contract from bot.js
+const { provider, escrowContract } = require('../bot.js');
 
 async function searchDeposit(depositId) {
 
     try {
         // Convert deposit ID to bytes32 format
-        const depositIdBytes32 = web3.utils.padLeft(web3.utils.toHex(depositId), 64);
+        const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(depositId), 32);
 
         // Get deposit details
-        const deposit = await escrowContract.methods.deposits(depositIdBytes32).call();
+        const deposit = await escrowContract.deposits(depositIdBytes32);
 
-        if (!deposit.depositor) {
+        if (!deposit.depositor || deposit.depositor === ethers.ZeroAddress) {
             return { error: `No deposit found with ID: ${depositId}` };
         }
 
         // Get deposit with all related data using getDeposit method
-        const depositData = await escrowContract.methods.getDeposit(depositId).call();
+        const depositData = await escrowContract.getDeposit(depositId);
 
         // Get associated intents
-        const intents = await escrowContract.methods.getIntent(depositIdBytes32).call();
+        const intents = await escrowContract.getIntent(depositIdBytes32);
 
         // Format the data for return
         const result = {
@@ -38,7 +35,7 @@ async function searchDeposit(depositId) {
             amount: depositData.deposit.amount,
             intentHashes: depositData.deposit.intentHashes,
             status: depositData.deposit.acceptingIntents ? 'Active' : 'Inactive',
-            availableLiquidity: web3.utils.fromWei(depositData.availableLiquidity, 'ether'),
+            availableLiquidity: ethers.formatEther(depositData.availableLiquidity),
             intents: intents,
             verifiers: depositData.verifiers.map(verifier => ({
                 verifier: verifier.verifier,
@@ -48,7 +45,7 @@ async function searchDeposit(depositId) {
                 },
                 currencies: verifier.currencies.map(currency => ({
                     code: currency.code,
-                    conversionRate: web3.utils.fromWei(currency.conversionRate, 'ether')
+                    conversionRate: ethers.formatEther(currency.conversionRate)
                 }))
             }))
         };

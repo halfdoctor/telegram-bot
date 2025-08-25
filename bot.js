@@ -6,21 +6,27 @@ const DatabaseManager = require('./database-manager');
 const { supabase } = require('./config');
 const { getExchangeRates } = require('./exchange-service');
 
-// Initialize web3
-const { Web3 } = require('web3');
+// Initialize ethers
+const { ethers } = require('ethers');
 const fs = require('fs');
+
+// Add this to your bot.js for the ping endpoint
+const express = require('express');
+const app = express();
+app.get('/ping', (req, res) => res.send('Bot is alive!'));
+app.listen(process.env.PORT || 3000);
 
 // Load Escrow contract ABI
 const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
 
-// Create web3 instance with provider
-const web3 = new Web3(process.env.BASE_RPC);
+// Create ethers provider
+const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC);
 
 // Initialize escrow contract
-const escrowContract = new web3.eth.Contract(ESCROW_ABI, '0xca38607d85e8f6294dc10728669605e6664c2d70');
+const escrowContract = new ethers.Contract('0xca38607d85e8f6294dc10728669605e6664c2d70', ESCROW_ABI, provider);
 
 // Export for use in search-deposit.js
-exports.web3 = web3;
+exports.provider = provider;
 exports.escrowContract = escrowContract;
 
 const depositAmounts = new Map(); // Store deposit amounts temporarily

@@ -1,6 +1,6 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 const { createClient } = require('@supabase/supabase-js');
-const { Web3 } = require('web3');
+const { ethers } = require('ethers');
 const fs = require('fs');
 
 // Supabase setup
@@ -9,14 +9,14 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// Initialize web3
-const web3 = new Web3(process.env.BASE_RPC);
+// Initialize ethers provider
+const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC);
 
 // Load Escrow contract ABI
 const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
 
 // Initialize escrow contract
-const escrowContract = new web3.eth.Contract(ESCROW_ABI, '0xca38607d85e8f6294dc10728669605e6664c2d70');
+const escrowContract = new ethers.Contract('0xca38607d85e8f6294dc10728669605e6664c2d70', ESCROW_ABI, provider);
 
 // Exchange rate API configuration
 const EXCHANGE_API_URL = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}/latest/USD`;
@@ -91,7 +91,7 @@ const formatConversionRate = (conversionRate, fiatCode) => {
 
 module.exports = {
   supabase,
-  web3,
+  provider,
   escrowContract,
   EXCHANGE_API_URL,
   depositAmounts,
