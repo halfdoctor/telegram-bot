@@ -1,6 +1,6 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 const TelegramBot = require('node-telegram-bot-api');
-const { searchDeposit } = require('./scripts/search-deposit.js');
+const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
 const DatabaseManager = require('./scripts/database-manager.js');
 const { supabase } = require('./config.js');
 const { getExchangeRates } = require('./scripts/exchange-service.js');
@@ -722,7 +722,8 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 
     else if (data === 'prompt_deposit_search') {
-      await bot.editMessageText('🔍 **Search info about a Deposit**\n\nUse the command below to search information about a specific deposit:\n\n`/searchdeposit <id>`\n\nExamples:\n• `/searchdeposit 123` - search for deposit 123\n\nReplace `<id>` with the actual deposit ID you want to review.', {
+      userStates.set(chatId, { action: 'waiting_search_add', messageId });
+      await bot.editMessageText('🔍 **Search info about a Deposit**\n\n**Please send the deposit ID below.**\n\nYou can also use the command `/searchdeposit <id>` to search information about a specific deposit:\n\nExamples:\n`123` - search for deposit 123\nOr\n/searchdeposit 123\n', {
         chat_id: chatId,
         message_id: messageId,
         parse_mode: 'Markdown',
@@ -1108,6 +1109,55 @@ bot.on('message', async (msg) => {
         reply_markup: createDepositMenu()
       });
       
+      // Delete user's input message
+      try {
+        await bot.deleteMessage(chatId, msg.message_id);
+      } catch (e) {
+        // Ignore if can't delete
+      }
+    }
+
+    else if (action === 'waiting_search_add') {
+      const newIds = text.split(/[,\s]+/).map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+      if (newIds.length === 0) {
+        bot.sendMessage(chatId, '❌ No valid deposit IDs provided. Please try again with numbers only.', {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🔙 Back to Menu', callback_data: 'menu_deposits' }
+            ]]
+          }
+        });
+        return;
+      }
+
+      // Update the original menu message to show searching
+      await bot.editMessageText('🔍 **Searching Deposits...**\n\nPlease wait while I search for the deposit information.', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+
+      // Show typing indicator while processing
+      await bot.sendChatAction(chatId, 'typing');
+
+      for (const id of newIds) {
+        try {
+          const result = await searchDeposit(id);
+          const message = await formatTelegramMessage(result);
+          await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        } catch (error) {
+          console.error('Error searching deposit:', error);
+          await bot.sendMessage(chatId, `❌ Error searching deposit ${id}: ${error.message}`, { parse_mode: 'Markdown' });
+        }
+      }
+
+      // Show completed search message
+      await bot.sendMessage(chatId, '🔍 **Search Complete**\n\nAll deposit information has been retrieved.', {
+        parse_mode: 'Markdown',
+        reply_markup: createDepositMenu()
+      });
+
       // Delete user's input message
       try {
         await bot.deleteMessage(chatId, msg.message_id);
@@ -1897,8 +1947,8 @@ bot.onText(/\/searchdeposit (\d+)/, async (msg, match) => {
     const result = await searchDeposit(depositId);
 
     // Format and send the message
-    const message = formatTelegramMessage(result);
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    const message = await formatTelegramMessage(result);
+    await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
 
   } catch (error) {
     console.error('Error in search deposit command:', error);

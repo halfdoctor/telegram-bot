@@ -8,6 +8,9 @@ const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../abi.js', 'utf8'))
 // Import provider and contract from config module
 const { provider, escrowContract, currencyHashToCode, verifierMapping, getPlatformName, platformNameMapping, currencyNameMapping } = require('../config.js');
 
+// Import exchange service for market rate comparisons
+const { getCurrencyRate } = require('./exchange-service.js');
+
 // Enhanced platform name resolver
 const getEnhancedPlatformName = (verifierAddress) => {
   if (!verifierAddress) return 'Unknown Platform';
@@ -173,46 +176,46 @@ async function searchDeposit(depositId) {
 }
 
 // Format the search result for Telegram message
-function formatTelegramMessage(result) {
+async function formatTelegramMessage(result) {
   if (result.error) {
     return `❌ ${result.error}`;
   }
 
   // Format the response
-  let message = `🔍 **Deposit Search Results**\n\n`;
-  message += `📋 **Basic Information:**\n`;
-  message += `• Deposit ID: \`${result.depositId}\`\n`;
-  message += `• Depositor: \`${result.depositor}\`\n`;
-  message += `• Token: \`${result.token}\`\n`;
-  message += `• Amount: \`${formatUSDC(result.amount)}\` USDC\n`;
-  message += `• Remaining Amount: \`${formatUSDC(result.remainingAmount)}\` USDC\n`;
+  let message = `🔍 <b>Deposit Search Results</b>\n\n`;
+  message += `📋 <b>Basic Information:</b>\n`;
+  message += `• Deposit ID: ${result.depositId}\n`;
+  message += `• Depositor: ${result.depositor}\n`;
+  message += `• Token: ${result.token}\n`;
+  message += `• Amount: ${formatUSDC(result.amount)} USDC\n`;
+  message += `• Remaining Amount: ${formatUSDC(result.remainingAmount)} USDC\n`;
   message += `• Status: ${result.status}\n\n`;
 
   if (result.intents && result.intents.length > 0) {
-    message += `📝 **Associated Intents:**\n`;
+    message += `📝 <b>Associated Intents:</b>\n`;
     result.intents.forEach((intent, index) => {
       // Handle both detailed intent objects and simple hash strings
       if (typeof intent === 'string') {
         // Legacy format - just the hash
-        message += `• Intent ${index + 1}: \`${intent}\`\n`;
+        message += `• Intent ${index + 1}: ${intent}\n`;
       } else if (intent && typeof intent === 'object') {
         // New detailed format - check if we have intentHash or use index
         const hash = intent.intentHash || `intent-${index + 1}`;
-        message += `• Intent ${index + 1}: \`${hash}\`\n`;
+        message += `• Intent ${index + 1}: ${hash}\n`;
         if (intent.amount !== undefined) {
-          message += `  └ 💰 Amount: \`${formatUSDC(intent.amount)}\` USDC\n`;
+          message += `       💰 Amount: ${formatUSDC(intent.amount)} USDC\n`;
         }
         if (intent.verifier) {
-          message += `  └ 🏦 Verifier: \`${intent.verifier}\`\n`;
+          message += `       🏦 Verifier: ${intent.verifier}\n`;
         }
         if (intent.currencyCode) {
-          message += `  └ 💱 Currency: \`${intent.currencyCode}\`\n`;
+          message += `       💱 Currency: ${intent.currencyCode}\n`;
         }
         if (intent.exchangeRate) {
-          message += `  └ 📊 Rate: \`${intent.exchangeRate}\`\n`;
+          message += `       📊 Rate: ${intent.exchangeRate}\n`;
         }
         if (intent.timeSinceOrder) {
-          message += `  └ ⏰ Time: \`${intent.timeSinceOrder}\`\n`;
+          message += `       ⏰ Time: ${intent.timeSinceOrder}\n`;
         }
       }
     });
@@ -220,16 +223,55 @@ function formatTelegramMessage(result) {
   }
 
   if (result.verificationData && result.verificationData.length > 0) {
-    message += `🔐 **Supported Platforms & Currencies:**\n`;
-    result.verificationData.forEach((data, index) => {
+    message += `🔐 <b>Supported Platforms & Currencies:</b>\n`;
+    for (const data of result.verificationData) {
       message += `• ${data.platform}\n`;
       if (data.currencies && data.currencies.length > 0) {
-        data.currencies.forEach(currency => {
-          const rate = (Number(currency.conversionRate)).toFixed(6);
-          message += `  └ ${currency.code} ${rate}\n`;
-        });
+        for (const currency of data.currencies) {
+          const rate = (Number(currency.conversionRate)).toFixed(4);
+
+          // Fetch current market rate for comparison
+          let marketRateText = '';
+          let markupText = '';
+
+          try {
+            // Get USD to fiat rate (e.g., USD to EUR)
+            const marketRate = await getCurrencyRate('USD', currency.code);
+
+            if (marketRate && marketRate > 0) {
+              // Calculate markup percentage: ((offered_rate - market_rate) / market_rate) * 100
+              const markupPercentage = ((Number(currency.conversionRate) - marketRate) / marketRate) * 100;
+
+              // Format market rate in blue
+              const marketRateFormatted = marketRate.toFixed(4);
+              rateText =`<b>${rate}</b>`;
+              marketRateText = `${marketRateFormatted}`;
+
+              // Format markup percentage with color coding
+              const absMarkup = Math.abs(markupPercentage);
+              const markupFormatted = markupPercentage.toFixed(2);
+
+              if (markupPercentage >= 0) {
+                // Positive markup (green)
+                markupText = `🟢 <b>+${markupFormatted}%</b>`;
+              } else {
+                // Negative markup (red)
+                markupText = `🔴 <b>${markupFormatted}%</b>`;
+              }
+            } else {
+              marketRateText = 'N/A';
+              markupText = 'N/A';
+            }
+          } catch (error) {
+            console.error(`Error fetching market rate for ${currency.code}:`, error);
+            marketRateText = 'N/A';
+            markupText = 'N/A';
+          }
+
+          message += `       ${currency.code} ${rateText} (Mkt: ${marketRateText}) (${markupText})\n`;
+        }
       }
-    });
+    }
     message += `\n`;
   }
 
@@ -240,7 +282,7 @@ function formatTelegramMessage(result) {
 function formatUSDC(amount) {
   if (typeof amount === 'string') {
     // If it's already formatted, return as is
-    return amount;
+    return (Number(amount)).toFixed(2);
   }
 
   if (typeof amount === 'bigint' || typeof amount === 'number') {

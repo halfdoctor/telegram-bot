@@ -1,3 +1,4 @@
+const https = require('https');
 const { EXCHANGE_API_URL } = require('../config');
 
 // Cache for exchange rates
@@ -16,16 +17,57 @@ async function getExchangeRates() {
   }
 
   try {
-    const response = await fetch(EXCHANGE_API_URL);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
+    const data = await new Promise((resolve, reject) => {
+      const url = new URL(EXCHANGE_API_URL);
+      const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Node.js-Telegram-Bot'
+        }
+      };
 
-    const data = await response.json();
+      const req = https.request(options, (res) => {
+        let body = '';
 
-    if (data.result === 'error') {
-      throw new Error(`Exchange API error: ${data['error-type']}`);
-    }
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+
+        res.on('end', () => {
+          try {
+            if (res.statusCode !== 200) {
+              reject(new Error(`HTTP error! status: ${res.statusCode}`));
+              return;
+            }
+
+            const jsonData = JSON.parse(body);
+
+            if (jsonData.result === 'error') {
+              reject(new Error(`Exchange API error: ${jsonData['error-type']}`));
+              return;
+            }
+
+            resolve(jsonData);
+          } catch (error) {
+            reject(new Error(`JSON parsing error: ${error.message}`));
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        reject(new Error(`Request error: ${error.message}`));
+      });
+
+      req.setTimeout(10000, () => {
+        req.destroy();
+        reject(new Error('Request timeout'));
+      });
+
+      req.end();
+    });
 
     // Cache the result
     exchangeRateCache = {
@@ -124,23 +166,37 @@ async function convertCurrency(amount, fromCurrency, toCurrency) {
 
 async function getCurrencyRate(fromCurrency, toCurrency) {
   try {
+    console.log(`getCurrencyRate: ${fromCurrency} -> ${toCurrency}`);
     if (fromCurrency === toCurrency) {
       return 1;
     }
 
-    const rates = await getExchangeRates();
+    // Helper function to extract ISO currency code from emoji-formatted names
+    const extractISOCurrencyCode = (currencyString) => {
+      // Handle emoji-formatted currency names like "🇺🇸 $ USD"
+      const match = currencyString.match(/([A-Z]{3})\s*$/);
+      return match ? match[1] : currencyString;
+    };
 
-    if (fromCurrency === 'USD') {
-      return rates.conversion_rates[toCurrency] || null;
+    const cleanFromCurrency = extractISOCurrencyCode(fromCurrency);
+    const cleanToCurrency = extractISOCurrencyCode(toCurrency);
+
+    console.log(`Cleaned currencies: ${cleanFromCurrency} -> ${cleanToCurrency}`);
+
+    const rates = await getExchangeRates();
+    console.log(`Rates available for: ${cleanToCurrency}:`, rates.conversion_rates?.[cleanToCurrency] || 'MISSING');
+
+    if (cleanFromCurrency === 'USD') {
+      return rates.conversion_rates[cleanToCurrency] || null;
     }
 
-    if (toCurrency === 'USD') {
-      return 1 / rates.conversion_rates[fromCurrency] || null;
+    if (cleanToCurrency === 'USD') {
+      return 1 / rates.conversion_rates[cleanFromCurrency] || null;
     }
 
     // Cross rate: from -> USD -> to
-    const fromRate = rates.conversion_rates[fromCurrency];
-    const toRate = rates.conversion_rates[toCurrency];
+    const fromRate = rates.conversion_rates[cleanFromCurrency];
+    const toRate = rates.conversion_rates[cleanToCurrency];
 
     if (!fromRate || !toRate) {
       return null;
@@ -148,7 +204,7 @@ async function getCurrencyRate(fromCurrency, toCurrency) {
 
     return toRate / fromRate;
   } catch (error) {
-    console.error(`Error getting rate from ${fromCurrency} to ${toCurrency}:`, error);
+    console.error(`Error getting rate from ${cleanFromCurrency} to ${cleanToCurrency}:`, error.message);
     return null;
   }
 }
