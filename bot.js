@@ -6,6 +6,7 @@ const { supabase } = require('./config.js');
 const { getExchangeRates } = require('./scripts/exchange-service.js');
 const express = require('express');
 const { getWeb3Service } = require('./scripts/web3-service.js')
+const { startDepositMonitor } = require('./scripts/deposit-monitor.js');
 
 // Add HTTP server for Render health checks
 const app = express();
@@ -140,6 +141,8 @@ const initializeBot = async () => {
       console.log('⚠️ Could not send initialization message to group (this is optional):', telegramError.message);
       console.log('✅ Bot is still fully functional for individual users!');
     }
+  // Start the deposit monitor
+  startDepositMonitor(bot);
     
   } catch (err) {
     console.error('❌ Bot initialization failed:', err);

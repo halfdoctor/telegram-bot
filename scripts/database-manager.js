@@ -313,6 +313,22 @@ class DatabaseManager {
     return Array.from(allUsers);
   }
 
+  // Get all unique chat_ids from user_deposits where is_active is true
+  async getAllUsersWithActiveDeposits() {
+    const { data, error } = await supabase
+      .from('user_deposits')
+      .select('chat_id')
+      .eq('is_active', true);
+
+    if (error) {
+      console.error('Error fetching all users with active deposits:', error);
+      return [];
+    }
+
+    // Return unique chat_ids
+    return [...new Set(data.map(row => row.chat_id))];
+  }
+
   // BONUS: Analytics methods (new!)
   async getAnalytics() {
     // Total users who ever used the bot
