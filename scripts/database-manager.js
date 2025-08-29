@@ -1,4 +1,4 @@
-const { supabase } = require('./config');
+const { supabase } = require('../config');
 
 class DatabaseManager {
   // Helper function to format timestamps for PostgreSQL (without timezone)
@@ -466,7 +466,32 @@ class DatabaseManager {
       return [];
     }
 
-    return data || [];
+    if (!data || data.length === 0) {
+      return [];
+    }
+
+    // Deduplicate by chat_id to prevent duplicate notifications
+    const uniqueUsers = new Map();
+    data.forEach(user => {
+      // Validate user object structure
+      if (!user || !user.chat_id) {
+        console.error('Invalid user object in getUsersWithSniper result:', user);
+        return;
+      }
+
+      const chatId = user.chat_id;
+
+      // Keep the entry with the most recent created_at timestamp
+      const existingUser = uniqueUsers.get(chatId);
+      if (!existingUser ||
+          // If user.created_at is missing/invalid, prefer the existing entry
+          (user.created_at && (!existingUser.created_at ||
+          new Date(user.created_at) > new Date(existingUser.created_at)))) {
+        uniqueUsers.set(chatId, user);
+      }
+    });
+
+    return Array.from(uniqueUsers.values());
   }
 
   async logSniperAlert(chatId, depositId, currency, depositRate, marketRate, percentageDiff) {

@@ -78,8 +78,41 @@ async function searchDeposit(depositId) {
 
         // Helper function to format address
         const formatAddress = (address) => {
-            if (address === ethers.ZeroAddress) return 'N/A';
-            return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+          if (address === ethers.ZeroAddress) return 'N/A';
+          return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+        };
+        
+        // Helper function to fetch detailed intent data
+        const getIntentDetails = async (intentHash) => {
+          try {
+            const intentView = await escrowContract.getIntent(intentHash);
+
+            return {
+              intentHash: intentHash, // Use the original hash parameter
+              amount: formatAmount(intentView.intent.amount, 6), // USDC has 6 decimals
+              verifier: getEnhancedPlatformName(intentView.intent.paymentVerifier),
+              currencyCode: getCurrencyCode(intentView.intent.fiatCurrency),
+              exchangeRate: formatAmount(intentView.intent.conversionRate, 18),
+              timestamp: intentView.intent.timestamp,
+              timeSinceOrder: calculateTimeSince(intentView.intent.timestamp)
+            };
+          } catch (error) {
+            console.error('Error fetching intent details:', error);
+            return null;
+          }
+        };
+        
+        // Helper function to calculate time since order
+        const calculateTimeSince = (timestamp) => {
+          if (!timestamp || timestamp === 0) return 'N/A';
+        
+          const now = Math.floor(Date.now() / 1000); // Current time in seconds
+          const secondsSince = now - Number(timestamp);
+        
+          if (secondsSince < 60) return `${secondsSince}s ago`;
+          if (secondsSince < 3600) return `${Math.floor(secondsSince / 60)}m ago`;
+          if (secondsSince < 86400) return `${Math.floor(secondsSince / 3600)}h ago`;
+          return `${Math.floor(secondsSince / 86400)}d ago`;
         };
 
         // Format verifiers with platform names and currency codes
@@ -97,7 +130,22 @@ async function searchDeposit(depositId) {
         }));
 
         // Get associated intents
-        const intents = depositData.deposit.intentHashes || [];
+        const intentHashes = depositData.deposit.intentHashes || [];
+
+        // Fetch detailed intent data for each intent hash
+        const detailedIntents = [];
+        for (const intentHash of intentHashes) {
+            try {
+                const intentDetails = await getIntentDetails(intentHash);
+                if (intentDetails) {
+                    detailedIntents.push(intentDetails);
+                } else {
+                    console.log(`Could not fetch details for intent: ${intentHash}`);
+                }
+            } catch (error) {
+                console.error(`Error fetching intent details for ${intentHash}:`, error.message);
+            }
+        }
 
         // Get verification data with platform names and their currencies
         const verificationData = formattedVerifiers.map(verifier => ({
@@ -111,8 +159,9 @@ async function searchDeposit(depositId) {
             depositor: depositData.deposit.depositor,
             token: getTokenName(depositData.deposit.token),
             amount: formatAmount(depositData.deposit.amount, 6), // USDC has 6 decimals
+            remainingAmount: formatAmount(depositData.deposit.remainingDeposits, 6),
             status: depositData.deposit.acceptingIntents ? '✅ Active' : '❌ Inactive',
-            intents: intents,
+            intents: detailedIntents, // Use detailed intents instead of just hashes
             verificationData: verificationData
         };
 
@@ -136,12 +185,36 @@ function formatTelegramMessage(result) {
   message += `• Depositor: \`${result.depositor}\`\n`;
   message += `• Token: \`${result.token}\`\n`;
   message += `• Amount: \`${formatUSDC(result.amount)}\` USDC\n`;
+  message += `• Remaining Amount: \`${formatUSDC(result.remainingAmount)}\` USDC\n`;
   message += `• Status: ${result.status}\n\n`;
 
   if (result.intents && result.intents.length > 0) {
     message += `📝 **Associated Intents:**\n`;
     result.intents.forEach((intent, index) => {
-      message += `• Intent ${index + 1}: \`${intent}\`\n`;
+      // Handle both detailed intent objects and simple hash strings
+      if (typeof intent === 'string') {
+        // Legacy format - just the hash
+        message += `• Intent ${index + 1}: \`${intent}\`\n`;
+      } else if (intent && typeof intent === 'object') {
+        // New detailed format - check if we have intentHash or use index
+        const hash = intent.intentHash || `intent-${index + 1}`;
+        message += `• Intent ${index + 1}: \`${hash}\`\n`;
+        if (intent.amount !== undefined) {
+          message += `  └ 💰 Amount: \`${formatUSDC(intent.amount)}\` USDC\n`;
+        }
+        if (intent.verifier) {
+          message += `  └ 🏦 Verifier: \`${intent.verifier}\`\n`;
+        }
+        if (intent.currencyCode) {
+          message += `  └ 💱 Currency: \`${intent.currencyCode}\`\n`;
+        }
+        if (intent.exchangeRate) {
+          message += `  └ 📊 Rate: \`${intent.exchangeRate}\`\n`;
+        }
+        if (intent.timeSinceOrder) {
+          message += `  └ ⏰ Time: \`${intent.timeSinceOrder}\`\n`;
+        }
+      }
     });
     message += `\n`;
   }

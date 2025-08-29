@@ -1,4 +1,4 @@
-const { EXCHANGE_API_URL } = require('./config');
+const { EXCHANGE_API_URL } = require('../config');
 
 // Cache for exchange rates
 let exchangeRateCache = {
