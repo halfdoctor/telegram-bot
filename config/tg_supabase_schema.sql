@@ -56,6 +56,7 @@ CREATE TABLE public.user_settings (
   updated_at timestamp with time zone DEFAULT now(),
   is_active boolean DEFAULT true,
   threshold numeric DEFAULT 0.2,
+  deposit_threshold numeric DEFAULT 0.25,
   CONSTRAINT user_settings_pkey PRIMARY KEY (id),
   CONSTRAINT fk_user_settings_chat_id FOREIGN KEY (chat_id) REFERENCES public.users(chat_id)
 );

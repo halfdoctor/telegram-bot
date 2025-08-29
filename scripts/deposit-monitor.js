@@ -13,6 +13,7 @@ async function monitorDeposits(bot) {
     for (const chatId of users) {
         console.log(`Processing deposits for user: ${chatId}`);
         const userDepositIds = await db.getUserDeposits(chatId); // This returns a Set of deposit_ids
+        const userThreshold = await db.getUserDepositThreshold(chatId) || 0.25; // Default to 0.25% if not set
         
         if (userDepositIds.size === 0) {
             console.log(`No active deposits found for user ${chatId}.`);
@@ -42,8 +43,7 @@ async function monitorDeposits(bot) {
                                 continue;
                             }
 
-                            const THRESHOLD_PERCENTAGE = 0.25; // Notify if deposit rate is 0.25% lower than market
-                            const lowerBound = marketRate * (1 - THRESHOLD_PERCENTAGE / 100);
+                            const lowerBound = marketRate * (1 - userThreshold / 100);
 
                             if (depositExchangeRate < lowerBound) {
                                 const percentageDiff = ((marketRate - depositExchangeRate) / marketRate) * 100;

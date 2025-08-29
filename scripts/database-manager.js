@@ -584,6 +584,34 @@ class DatabaseManager {
 
     if (error) console.error('Error setting user threshold:', error);
   }
+
+  async setUserDepositThreshold(chatId, threshold) {
+    const { error } = await supabase
+      .from('user_settings')
+      .upsert({
+        chat_id: chatId,
+        deposit_threshold: threshold,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'chat_id'
+      });
+
+    if (error) console.error('Error setting user deposit threshold:', error);
+  }
+
+  async getUserDepositThreshold(chatId) {
+    const { data, error } = await supabase
+      .from('user_settings')
+      .select('deposit_threshold')
+      .eq('chat_id', chatId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error getting user deposit threshold:', error);
+    }
+
+    return data?.deposit_threshold;
+  }
 }
 
 module.exports = DatabaseManager;

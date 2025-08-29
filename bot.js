@@ -468,6 +468,19 @@ bot.onText(/\/unsnipe (.+)/, async (msg, match) => {
   bot.sendMessage(chatId, `🎯 Stopped sniping ${currency}${platformText}.`, { parse_mode: 'Markdown' });
 });
 
+bot.onText(/\/depositthreshold (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const threshold = parseFloat(match[1]);
+
+  if (isNaN(threshold)) {
+    bot.sendMessage(chatId, 'Invalid threshold. Please provide a number.');
+    return;
+  }
+
+  await db.setUserDepositThreshold(chatId, threshold);
+  bot.sendMessage(chatId, `Deposit alert threshold set to ${threshold}%.`);
+});
+
 // Menu creation functions
 const createMainMenu = () => {
   return {
@@ -542,7 +555,10 @@ const createSettingsMenu = () => {
   return {
     inline_keyboard: [
       [
-        { text: '🗑️ Clear All Data', callback_data: 'confirm_clearall' }
+        { text: '📊 Set Deposit Alert Threshold', callback_data: 'prompt_deposit_threshold' }
+      ],
+      [
+        { text: '�️ Clear All Data', callback_data: 'confirm_clearall' }
       ],
       [
         { text: '🔄 Refresh Status', callback_data: 'action_status' }
@@ -1034,6 +1050,23 @@ Questions? The menu system makes everything easier! 🚀
       });
     }
 
+    else if (data === 'prompt_deposit_threshold') {
+      // Check if this is a group chat and user is not admin
+      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+        return;
+      }
+
+      // Set the user's state to indicate we are waiting for their threshold input
+      userStates.set(chatId, 'awaiting_deposit_threshold');
+    
+      // Ask the user for the new threshold
+      bot.sendMessage(chatId, 'Please enter the new deposit alert threshold (e.g., 0.5 for 0.5%).\n\nThis threshold is used to notify you 4 hourly about your tracked deposits that are LESS than the market rate by your given percentage. (default value 0.25%)');
+      
+      // Acknowledge the button click
+      bot.answerCallbackQuery(callbackQuery.id);
+    }
+
     else if (data === 'confirm_clearall_confirmed') {
       // Check if this is a group chat and user is not admin
       if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
@@ -1118,6 +1151,24 @@ bot.on('message', async (msg) => {
       } catch (e) {
         // Ignore if can't delete
       }
+    }
+
+    // Check if we are waiting for a deposit threshold from this user
+    else if (userStates.get(chatId) === 'awaiting_deposit_threshold') {
+      // We got the response, so clear the user's state
+      userStates.delete(chatId);
+      
+      const threshold = parseFloat(msg.text);
+      
+      if (isNaN(threshold)) {
+        bot.sendMessage(chatId, '❌ Invalid input. Please provide a non-negative number for the threshold.');
+        return;
+      }
+      
+      // Save the new threshold to the database
+      await db.setUserDepositThreshold(chatId, threshold);
+      
+      bot.sendMessage(chatId, `✅ Deposit alert threshold has been set to *${threshold}%*.`, { parse_mode: 'Markdown' });
     }
 
     else if (action === 'waiting_search_add') {
