@@ -78,19 +78,20 @@ const handleContractEvent = async (log) => {
 };
 
 async function handleDepositCurrencyAdded(parsed, log) {
-    // Handle BigInt values properly from parsed event
+  // Handle BigInt values properly from parsed event
   const depositId = BigInt(parsed.args[0]).toString();
   const verifier = parsed.args[1];
   const currency = parsed.args[2];
   const conversionRate = BigInt(parsed.args[3]).toString();
-  // const { depositId, verifier, currency, conversionRate } = parsed.args;
 
-  // ✅ RETRIEVE STORED DEPOSIT DATA FROM GLOBAL STATE
-  const depositData = Web3State.getDepositStateById(depositId.toString());
+  console.log(`📊 DepositCurrencyAdded: ID=${depositId}, Currency=${currency}, Verifier=${verifier}, Rate=${conversionRate}`);
 
-  if (!depositData || !depositData.depositAmount) {
-    console.log(`📊 Fetching deposit data for ${depositId}`);
+  // ✅ RETRIEVE STORED DEPOSIT DATA FROM GLOBAL STATE FIRST
+  let web3StateData = Web3State.getDepositStateById(depositId.toString());
+  let depositAmount = web3StateData?.depositAmount || null;
 
+  // If no Web3State data, try contract and database fallback
+  if (!web3StateData || !depositAmount) {
     let fallbackAmount = null;
 
     // Try to get deposit amount from database first
@@ -107,26 +108,37 @@ async function handleDepositCurrencyAdded(parsed, log) {
 
     // Try to get deposit amount from contract using the correct method from search-deposit.js
     try {
-      const { escrowContract } = require('../config.js');
       if (escrowContract) {
         // Method 1: Use the bytes32 format for deposits mapping (primary method)
         try {
           const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(BigInt(depositId)), 32);
           const deposit = await escrowContract.deposits(depositIdBytes32);
           if (deposit && deposit.depositor && deposit.depositor !== ethers.ZeroAddress) {
-            console.log(`✅ Deposit found in mapping`);
+            // Found deposit in mapping, now get detailed data
           }
         } catch (depositsError) {
           console.warn(`⚠️ Mapping check failed: ${depositsError.message}`);
         }
 
-        // Method 2: Use getDeposit method for full data (secondary method)
+        // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
         try {
-          const contractDeposit = await escrowContract.getDeposit(depositId);
-          if (contractDeposit && contractDeposit.deposit && contractDeposit.deposit.amount) {
-            const contractAmount = BigInt(contractDeposit.deposit.amount).toString();
+          const depositData = await escrowContract.getDeposit(depositId);
+
+          // Check for deposit data structure exactly like in search-deposit.js
+          if (depositData && depositData.deposit && depositData.deposit.amount) {
+            const contractAmount = BigInt(depositData.deposit.amount).toString();
             fallbackAmount = contractAmount;
             console.log(`✅ Retrieved from contract: ${Utils.convertFromMicrounits(contractAmount)} USDC`);
+
+            // Cache in Web3State for future use
+            try {
+              Web3State.setDepositState(depositId.toString(), {
+                depositAmount: contractAmount,
+                verifierAddress: verifier.toLowerCase()
+              });
+            } catch (cacheError) {
+              console.error(`❌ Caching error:`, cacheError.message);
+            }
           }
         } catch (getDepositError) {
           console.warn(`⚠️ getDeposit failed: ${getDepositError.message}`);
@@ -139,27 +151,22 @@ async function handleDepositCurrencyAdded(parsed, log) {
     // If still no amount, use default fallback
     if (!fallbackAmount) {
       fallbackAmount = '1000000'; // Default fallback: 1 USDC
-      console.log(`⚠️ Using default fallback amount: ${fallbackAmount}`);
+      console.log(`⚠️ Using default fallback: 1.00 USDC`);
     }
 
-    // Only trigger sniper if we have a non-zero verifier
-    if (!isZeroAddress(verifier)) {
-      await checkSniperOpportunity(depositId, fallbackAmount, currency, conversionRate, verifier);
-      console.log(`💡 Fallback sniper check triggered for deposit ${depositId} with amount ${fallbackAmount}`);
-    }
-    return;
+    depositAmount = fallbackAmount;
   }
 
   // Only check sniper opportunities for non-zero currencies
   if (!isZeroAddress(currency)) {
-    console.log(`➕ Processing deposit currency addition: ${depositId}`);
+    console.log(`📊 Processing sniper opportunity for deposit ${depositId}`);
 
     await checkSniperOpportunity(
       depositId,
-      depositData.depositAmount,
-      currency,
-      conversionRate,
-      verifier
+      depositAmount,    // ✅ REAL deposit amount from Web3State/contract/database
+      currency,         // ✅ Currency hash
+      conversionRate,   // ✅ Updated conversion rate
+      verifier          // ✅ Verifier address
     );
   }
 }
@@ -225,14 +232,6 @@ async function handleDepositConversionRateUpdated(parsed, log) {
               });
             } catch (cacheError) {
               console.error(`❌ Caching error:`, cacheError.message);
-            }
-
-            // Store in database for future use
-            try {
-              const dbManager = new DatabaseManager();
-              await dbManager.storeDepositAmount(depositId, contractAmount);
-            } catch (storeError) {
-              console.error(`❌ DB storage error:`, storeError.message);
             }
           }
         } catch (getDepositError) {
