@@ -20,6 +20,7 @@ const escrowContract = new ethers.Contract('0xca38607d85e8f6294dc10728669605e666
 
 // Exchange rate API configuration
 const EXCHANGE_API_URL = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}/latest/USD`;
+const FALLBACK_EXCHANGE_API_URL = 'https://api.frankfurter.app/latest?from=USD';
 
 // Global storage
 const depositAmounts = new Map(); // Store deposit amounts temporarily
@@ -168,6 +169,7 @@ module.exports = {
   provider,
   escrowContract,
   EXCHANGE_API_URL,
+  FALLBACK_EXCHANGE_API_URL,
   depositAmounts,
   intentDetails,
   verifierMapping,

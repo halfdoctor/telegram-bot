@@ -1,5 +1,5 @@
 const https = require('https');
-const { EXCHANGE_API_URL } = require('../config');
+const { EXCHANGE_API_URL, FALLBACK_EXCHANGE_API_URL } = require('../config');
 
 // Cache for exchange rates
 let exchangeRateCache = {
@@ -7,6 +7,48 @@ let exchangeRateCache = {
   timestamp: null,
   cacheDuration: 30 * 60 * 1000 // 30 minutes
 };
+
+async function _fetchData(apiUrl) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(apiUrl);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Node.js-Telegram-Bot'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          if (res.statusCode !== 200) {
+            return reject(new Error(`HTTP error! status: ${res.statusCode}`));
+          }
+          const jsonData = JSON.parse(body);
+          resolve(jsonData);
+        } catch (error) {
+          reject(new Error(`JSON parsing error: ${error.message}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(new Error(`Request error: ${error.message}`));
+    });
+
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    req.end();
+  });
+}
 
 async function getExchangeRates() {
   // Check cache first
@@ -16,92 +58,72 @@ async function getExchangeRates() {
     return exchangeRateCache.data;
   }
 
+  // Try primary API
   try {
-    const data = await new Promise((resolve, reject) => {
-      const url = new URL(EXCHANGE_API_URL);
-      const options = {
-        hostname: url.hostname,
-        path: url.pathname + url.search,
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Node.js-Telegram-Bot'
-        }
-      };
-
-      const req = https.request(options, (res) => {
-        let body = '';
-
-        res.on('data', (chunk) => {
-          body += chunk;
-        });
-
-        res.on('end', () => {
-          try {
-            if (res.statusCode !== 200) {
-              reject(new Error(`HTTP error! status: ${res.statusCode}`));
-              return;
-            }
-
-            const jsonData = JSON.parse(body);
-
-            if (jsonData.result === 'error') {
-              reject(new Error(`Exchange API error: ${jsonData['error-type']}`));
-              return;
-            }
-
-            resolve(jsonData);
-          } catch (error) {
-            reject(new Error(`JSON parsing error: ${error.message}`));
-          }
-        });
-      });
-
-      req.on('error', (error) => {
-        reject(new Error(`Request error: ${error.message}`));
-      });
-
-      req.setTimeout(10000, () => {
-        req.destroy();
-        reject(new Error('Request timeout'));
-      });
-
-      req.end();
-    });
-
-    // Cache the result
+    const data = await _fetchData(EXCHANGE_API_URL);
+    if (data.result === 'error') {
+      throw new Error(`Primary API error: ${data['error-type']}`);
+    }
+    console.log('Successfully fetched exchange rates from primary API.');
     exchangeRateCache = {
       data: data,
-      timestamp: now
+      timestamp: now,
+      cacheDuration: exchangeRateCache.cacheDuration
     };
-
     return data;
-  } catch (error) {
-    console.error('Error fetching exchange rates:', error);
+  } catch (primaryError) {
+    console.error('Error fetching from primary exchange rate API:', primaryError.message);
+    console.log('Attempting to use fallback exchange rate API...');
 
-    // Return cached data if available, even if expired
-    if (exchangeRateCache.data) {
-      console.log('Using expired cached exchange rates due to API error');
-      return exchangeRateCache.data;
-    }
-
-    // Return mock data as last resort
-    return {
-      result: 'success',
-      conversion_rates: {
-        EUR: 0.92,
-        GBP: 0.79,
-        JPY: 150.0,
-        AUD: 1.52,
-        CAD: 1.35,
-        CHF: 0.91,
-        CNY: 7.2,
-        INR: 83.0,
-        KRW: 1330.0,
-        BRL: 5.2,
-        MXN: 18.5
+    // Try fallback API
+    try {
+      const fallbackData = await _fetchData(FALLBACK_EXCHANGE_API_URL);
+      // Transform fallback data to match the primary API's structure
+      const transformedData = {
+        result: 'success',
+        provider: 'frankfurter.app',
+        conversion_rates: fallbackData.rates,
+      };
+      // Add the base currency to the rates, as Frankfurter doesn't include it
+      if (fallbackData.base) {
+        transformedData.conversion_rates[fallbackData.base] = 1.0;
       }
-    };
+
+      console.log('Successfully fetched and transformed data from fallback API.');
+      exchangeRateCache = {
+        data: transformedData,
+        timestamp: now,
+        cacheDuration: exchangeRateCache.cacheDuration
+      };
+      return transformedData;
+    } catch (fallbackError) {
+      console.error('Error fetching from fallback exchange rate API:', fallbackError.message);
+
+      // Use expired cache if available
+      if (exchangeRateCache.data) {
+        console.log('Using expired cached exchange rates due to API errors.');
+        return exchangeRateCache.data;
+      }
+
+      // Return mock data as a last resort
+      console.log('Using mock data as a last resort.');
+      return {
+        result: 'success',
+        conversion_rates: {
+          EUR: 0.92,
+          GBP: 0.79,
+          JPY: 150.0,
+          AUD: 1.52,
+          CAD: 1.35,
+          CHF: 0.91,
+          CNY: 7.2,
+          INR: 83.0,
+          KRW: 1330.0,
+          BRL: 5.2,
+          MXN: 18.5
+        }
+      };
+    }
   }
 }
 
