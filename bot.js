@@ -505,19 +505,18 @@ const createDepositMenu = () => {
   return {
     inline_keyboard: [
       [
-        { text: '🌐 Listen to ALL Deposits', callback_data: 'action_deposit_all' }
-      ],
-      [
-        { text: '🛑 Stop Listening to All', callback_data: 'action_deposit_stop' }
-      ],
-      [
         { text: '🔍 Search Specific Deposit', callback_data: 'prompt_deposit_search' }
       ],
       [
-        { text: '➕ Track Specific Deposit', callback_data: 'prompt_deposit_add' }
+        { text: '🌐 Listen to ALL Deposits', callback_data: 'action_deposit_all' },
+        { text: '🛑 Stop Listening to All', callback_data: 'action_deposit_stop' }
       ],
       [
+        { text: '➕ Track Specific Deposit', callback_data: 'prompt_deposit_add' },
         { text: '➖ Remove Specific Deposit', callback_data: 'prompt_deposit_remove' }
+      ],
+      [
+        { text: '📊 Set Deposit Alert Threshold', callback_data: 'prompt_deposit_threshold' }
       ],
       [
         { text: '🏠 Back to Main Menu', callback_data: 'menu_main' }
@@ -530,19 +529,17 @@ const createSniperMenu = () => {
   return {
     inline_keyboard: [
       [
-        { text: '🎯 Add Currency Sniper', callback_data: 'prompt_sniper_add' }
-      ],
-      [
-        { text: '📊 Set Alert Threshold', callback_data: 'prompt_threshold' }
-      ],
-      [
         { text: '📋 View My Snipers', callback_data: 'action_sniper_list' }
       ],
       [
+        { text: '🎯 Add Currency Sniper', callback_data: 'prompt_sniper_add' },
         { text: '🗑️ Remove Sniper', callback_data: 'prompt_sniper_remove' }
       ],
       [
         { text: '🧹 Clear All Snipers', callback_data: 'action_sniper_clear' }
+      ],
+      [
+        { text: '📊 Set Alert Threshold', callback_data: 'prompt_threshold' }
       ],
       [
         { text: '🏠 Back to Main Menu', callback_data: 'menu_main' }
@@ -556,6 +553,9 @@ const createSettingsMenu = () => {
     inline_keyboard: [
       [
         { text: '📊 Set Deposit Alert Threshold', callback_data: 'prompt_deposit_threshold' }
+      ],
+      [
+        { text: '🎯 Set Sniper Alert Threshold', callback_data: 'prompt_threshold' }
       ],
       [
         { text: '�️ Clear All Data', callback_data: 'confirm_clearall' }
