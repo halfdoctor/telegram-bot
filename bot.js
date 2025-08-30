@@ -3,7 +3,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
 const DatabaseManager = require('./scripts/database-manager.js');
 const { supabase } = require('./config.js');
-const { getExchangeRates } = require('./scripts/exchange-service.js');
 const express = require('express');
 const { getWeb3Service } = require('./scripts/web3-service.js')
 const { startDepositMonitor } = require('./scripts/deposit-monitor.js');

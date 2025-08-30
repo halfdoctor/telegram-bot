@@ -5,7 +5,7 @@ const { EXCHANGE_API_URL } = require('../config');
 let exchangeRateCache = {
   data: null,
   timestamp: null,
-  cacheDuration: 2 * 60 * 1000 // 5 minutes
+  cacheDuration: 30 * 60 * 1000 // 30 minutes
 };
 
 async function getExchangeRates() {
