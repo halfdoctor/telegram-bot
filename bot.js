@@ -6,6 +6,7 @@ const { supabase } = require('./config.js');
 const express = require('express');
 const { getWeb3Service } = require('./scripts/web3-service.js')
 const { startDepositMonitor } = require('./scripts/deposit-monitor.js');
+const { analyzeLiquidityProvider, formatLPProfileForTelegram } = require('./scripts/lpanalyser.js');
 
 // Add HTTP server for Render health checks
 const app = express();
@@ -490,11 +491,11 @@ const createMainMenu = () => {
       ],
       [
         { text: '📋 My Status', callback_data: 'action_list' },
-        { text: '🔧 Settings', callback_data: 'menu_settings' }
+        { text: '📈 LP Analysis', callback_data: 'prompt_lp_analysis' }
       ],
       [
-        { text: '❓ Help', callback_data: 'action_help' },
-        { text: '📈 System Status', callback_data: 'action_status' }
+        { text: '🔧 Settings', callback_data: 'menu_settings' },
+        { text: '❓ Help', callback_data: 'action_help' }
       ]
     ]
   };
@@ -741,7 +742,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     else if (data === 'prompt_deposit_search') {
       userStates.set(chatId, { action: 'waiting_search_add', messageId });
-      await bot.editMessageText('🔍 **Search info about a Deposit**\n\n**Please send the deposit ID below.**\n\nYou can also use the command `/searchdeposit <id>` to search information about a specific deposit:\n\nExamples:\n`123` - search for deposit 123\nOr\n/searchdeposit 123\n', {
+      await bot.editMessageText('🔍 **Search info about a Deposit**\n\n**Please send the deposit ID below to search information about a specific deposit.**\n\nExamples:\n`123` - search for deposit 123', {
         chat_id: chatId,
         message_id: messageId,
         parse_mode: 'Markdown',
@@ -883,6 +884,20 @@ bot.on('callback_query', async (callbackQuery) => {
           reply_markup: createSniperMenu()
         });
       }
+    }
+
+    else if (data === 'prompt_lp_analysis') {
+      userStates.set(chatId, { action: 'waiting_lp_address', messageId });
+      await bot.editMessageText('📈 *LP Analysis*\n\nPlease send the Ethereum address of the LP you want to analyze.', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '❌ Cancel', callback_data: 'menu_main' }
+          ]]
+        }
+      });
     }
 
     else if (data === 'prompt_sniper_remove') {
@@ -1171,6 +1186,57 @@ bot.on('message', async (msg) => {
       await db.setUserDepositThreshold(chatId, threshold);
       
       bot.sendMessage(chatId, `✅ Deposit alert threshold has been set to *${threshold}%*.`, { parse_mode: 'Markdown' });
+    }
+
+    else if (action === 'waiting_lp_address') {
+      const depositorAddress = text.trim();
+
+      if (!/^0x[a-fA-F0-9]{40}$/.test(depositorAddress)) {
+        bot.sendMessage(chatId, '❌ Invalid Ethereum address. Please provide a valid address starting with 0x.', {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🔙 Back to Menu', callback_data: 'menu_main' }
+            ]]
+          }
+        });
+        return;
+      }
+
+      await bot.editMessageText('⏳ **Analyzing LP Profile...**\n\nPlease wait while I fetch and process the data. This may take a moment.', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+
+      await bot.sendChatAction(chatId, 'typing');
+
+      try {
+        const profile = await analyzeLiquidityProvider(depositorAddress);
+        const message = formatLPProfileForTelegram(profile);
+        
+        await bot.sendMessage(chatId, message, { 
+          parse_mode: 'Markdown',
+          reply_markup: createMainMenu() 
+        });
+
+        // Clean up the prompt message
+        await bot.deleteMessage(chatId, messageId);
+        userStates.delete(chatId);
+
+      } catch (error) {
+        console.error('Failed to analyze LP profile:', error);
+        await bot.sendMessage(chatId, '❌ An error occurred while analyzing the LP profile.', { 
+          parse_mode: 'Markdown',
+          reply_markup: createMainMenu()
+        });
+      }
+
+      // Delete user's input message
+      try {
+        await bot.deleteMessage(chatId, msg.message_id);
+      } catch (e) {
+        // Ignore if can't delete
+      }
     }
 
     else if (action === 'waiting_search_add') {
@@ -1610,7 +1676,6 @@ Ready to begin?
 
 console.log('✅ Interactive menu system loaded successfully!');
 
-
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const helpMessage = `
@@ -1644,281 +1709,6 @@ bot.onText(/\/help/, (msg) => {
   
   bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
 });
-
-// Event handler function - now with sniper support
-const handleContractEvent = async (log) => {
-  console.log('\n📦 Raw log received:');
-  console.log(log);
-
-  try {
-    const parsed = iface.parseLog({ 
-      data: log.data, 
-      topics: log.topics 
-    });
-    
-    if (!parsed) {
-      console.log('⚠️ Log format did not match our ABI');
-      console.log('📝 Event signature:', log.topics[0]);
-      
-      if (log.topics.length >= 3) {
-        const topicDepositId = parseInt(log.topics[2], 16);
-        console.log('📊 Extracted deposit ID from topic:', topicDepositId);
-        
-        const interestedUsers = await db.getUsersInterestedInDeposit(topicDepositId);
-        if (interestedUsers.length > 0) {
-          console.log(`⚠️ Sending unrecognized event to ${interestedUsers.length} users`);
-          
-          const message = `
-⚠️ *Unrecognized Event for Deposit*
-• *Deposit ID:* \`${topicDepositId}\`
-• *Event Signature:* \`${log.topics[0]}\`
-• *Block:* ${log.blockNumber}
-• *Tx:* [View on BaseScan](${txLink(log.transactionHash)})
-`.trim();
-          
-          interestedUsers.forEach(chatId => {
-            const sendOptions = { 
-              parse_mode: 'Markdown', 
-              disable_web_page_preview: true,
-              reply_markup: createDepositKeyboard(topicDepositId)
-            };
-            if (chatId === ZKP2P_GROUP_ID) {
-              sendOptions.message_thread_id = ZKP2P_TOPIC_ID;
-            }
-            bot.sendMessage(chatId, message, sendOptions);
-          });
-        }
-      }
-      return;
-    }
-    
-    console.log('✅ Parsed log:', parsed.name);
-    console.log('🔍 Args:', parsed.args);
-
-    const { name } = parsed;
-
-    if (name === 'IntentSignaled') {
-      const { intentHash, depositId, verifier, owner, to, amount, fiatCurrency, conversionRate, timestamp } = parsed.args;    
-      const id = Number(depositId);
-      const fiatCode = getFiatCode(fiatCurrency);
-      const fiatAmount = ((Number(amount) / 1e6) * (Number(conversionRate) / 1e18)).toFixed(2);
-      const platformName = getPlatformName(verifier);
-      const formattedRate = formatConversionRate(conversionRate, fiatCode);
-      
-      console.log('🧪 IntentSignaled depositId:', id);
-      
-      intentDetails.set(intentHash.toLowerCase(), { fiatCurrency, conversionRate, verifier });
-      
-      const interestedUsers = await db.getUsersInterestedInDeposit(id);
-      if (interestedUsers.length === 0) {
-        console.log('🚫 Ignored — no users interested in this depositId.');
-        return;
-      }
-
-      console.log(`📤 Sending to ${interestedUsers.length} users interested in deposit ${id}`);
-
-      const message = `
-🟡 *Order Created*
-• *Deposit ID:* \`${id}\`
-• *Order ID:* \`${intentHash}\`
-• *Platform:* ${platformName}
-• *Owner:* \`${owner}\`
-• *To:* \`${to}\`
-• *Amount:* ${formatUSDC(amount)} USDC
-• *Fiat Amount:* ${fiatAmount} ${fiatCode} 
-• *Rate:* ${formattedRate}
-• *Time:* ${formatTimestamp(timestamp)}
-• *Block:* ${log.blockNumber}
-• *Tx:* [View on BaseScan](${txLink(log.transactionHash)})
-`.trim();
-
-      for (const chatId of interestedUsers) {
-        await db.updateDepositStatus(chatId, id, 'signaled', intentHash);
-        await db.logEventNotification(chatId, id, 'signaled');
-        
-        const sendOptions = { 
-          parse_mode: 'Markdown', 
-          disable_web_page_preview: true,
-          reply_markup: createDepositKeyboard(id)
-        };
-        if (chatId === ZKP2P_GROUP_ID) {
-          sendOptions.message_thread_id = ZKP2P_TOPIC_ID;
-        }
-        bot.sendMessage(chatId, message, sendOptions);
-      }
-    }
-
-if (name === 'IntentFulfilled') {
-  const { intentHash, depositId, verifier, owner, to, amount, sustainabilityFee, verifierFee } = parsed.args;
-  const txHash = log.transactionHash;
-  const id = Number(depositId);
-  
-  console.log('🧪 IntentFulfilled collected for batching - depositId:', id);
-  
-  // Initialize transaction data if not exists
-  if (!pendingTransactions.has(txHash)) {
-    pendingTransactions.set(txHash, {
-      fulfilled: new Set(),
-      pruned: new Set(),
-      blockNumber: log.blockNumber,
-      rawIntents: new Map()
-    });
-  }
-  
-  // Store the fulfillment data
-  const txData = pendingTransactions.get(txHash);
-  txData.fulfilled.add(intentHash.toLowerCase());
-  txData.rawIntents.set(intentHash.toLowerCase(), {
-    type: 'fulfilled',
-    depositId: id,
-    verifier,
-    owner,
-    to,
-    amount,
-    sustainabilityFee,
-    verifierFee,
-    intentHash
-  });
-  
-  // Schedule processing this transaction
-  scheduleTransactionProcessing(txHash);
-}
-
-if (name === 'IntentPruned') {
-  const { intentHash, depositId } = parsed.args;
-  const txHash = log.transactionHash;
-  const id = Number(depositId);
-  
-  console.log('🧪 IntentPruned collected for batching - depositId:', id);
-  
-  // Initialize transaction data if not exists
-  if (!pendingTransactions.has(txHash)) {
-    pendingTransactions.set(txHash, {
-      fulfilled: new Set(),
-      pruned: new Set(),
-      blockNumber: log.blockNumber,
-      rawIntents: new Map()
-    });
-  }
-  
-  // Store the pruned data
-  const txData = pendingTransactions.get(txHash);
-  txData.pruned.add(intentHash.toLowerCase());
-  txData.rawIntents.set(intentHash.toLowerCase(), {
-    type: 'pruned',
-    depositId: id,
-    intentHash
-  });
-  
-  // Schedule processing this transaction
-  scheduleTransactionProcessing(txHash);
-}
-
-if (name === 'DepositWithdrawn') {
-  const { depositId, depositor, amount } = parsed.args;
-  const id = Number(depositId);
-  
-  console.log(`💸 DepositWithdrawn: ${formatUSDC(amount)} USDC from deposit ${id} by ${depositor} - ignored`);
-  return;
-}
-
-if (name === 'DepositClosed') {
-  const { depositId, depositor } = parsed.args;
-  const id = Number(depositId);
-  
-  console.log(`🔒 DepositClosed: deposit ${id} by ${depositor} - ignored`);
-  return;
-}
-
-if (name === 'BeforeExecution') {
-  console.log(`🛠️ BeforeExecution event detected at block ${log.blockNumber}`);
-  return;
-}
-
-if (name === 'UserOperationEvent') {
-  const { userOpHash, sender, paymaster, nonce, success, actualGasCost, actualGasUsed } = parsed.args;
-  console.log(`📡 UserOperationEvent:
-  • Hash: ${userOpHash}
-  • Sender: ${sender}
-  • Paymaster: ${paymaster}
-  • Nonce: ${nonce}
-  • Success: ${success}
-  • Gas Used: ${actualGasUsed}
-  • Gas Cost: ${actualGasCost}
-  • Block: ${log.blockNumber}`);
-  return;
-}
-
-    
-if (name === 'DepositCurrencyRateUpdated') {
-  const { depositId, verifier, currency, conversionRate } = parsed.args;
-  const id = Number(depositId);
-  const fiatCode = getFiatCode(currency);
-  const rate = (Number(conversionRate) / 1e18).toFixed(6);
-  const platform = getPlatformName(verifier);
-
-  console.log(`📶 DepositCurrencyRateUpdated - ID: ${id}, ${platform}, ${fiatCode} rate updated to ${rate}`);
-  
-  // Check for sniper opportunity with updated rate
-  const depositAmount = await db.getDepositAmount(id);
-  if (depositAmount > 0) {
-    console.log(`🎯 Rechecking sniper opportunity due to rate update for deposit ${id}`);
-    await checkSniperOpportunity(id, depositAmount, currency, conversionRate, verifier);
-  }
-}
-
-if (name === 'DepositConversionRateUpdated') {
-  const { depositId, verifier, currency, newConversionRate } = parsed.args;
-  const id = Number(depositId);
-  const fiatCode = getFiatCode(currency);
-  const rate = (Number(newConversionRate) / 1e18).toFixed(6);
-  const platform = getPlatformName(verifier);
-
-  console.log(`📶 DepositConversionRateUpdated - ID: ${id}, ${platform}, ${fiatCode} rate updated to ${rate}`);
-  
-  // Check for sniper opportunity with updated rate
-  const depositAmount = await db.getDepositAmount(id);
-  if (depositAmount > 0) {
-    console.log(`🎯 Rechecking sniper opportunity due to conversion rate update for deposit ${id}`);
-    await checkSniperOpportunity(id, depositAmount, currency, newConversionRate, verifier);
-  }
-}
-    
-    
-if (name === 'DepositReceived') {
-  const { depositId, depositor, token, amount, intentAmountRange } = parsed.args;
-  const id = Number(depositId);
-  const usdcAmount = Number(amount);
-  
-  console.log(`💰 DepositReceived: ${id} with ${formatUSDC(amount)} USDC`);
-  
-  // Store the deposit amount for later sniper use
-  await db.storeDepositAmount(id, usdcAmount);
-}
-
-    // NEW: Handle DepositCurrencyAdded for sniper functionality
-  if (name === 'DepositCurrencyAdded') {
-    const { depositId, verifier, currency, conversionRate } = parsed.args;  
-    const id = Number(depositId);
-    
-    console.log('🎯 DepositCurrencyAdded detected:', id);
-    
-    // Get the actual deposit amount
-    const depositAmount = await db.getDepositAmount(id);
-    console.log(`💰 Retrieved deposit amount: ${depositAmount} (${formatUSDC(depositAmount)} USDC)`);
-    
-    // Check for sniper opportunity with real amount
-    await checkSniperOpportunity(id, depositAmount, currency, conversionRate, verifier);
-  }
-
-  } catch (err) {
-    console.error('❌ Failed to parse log:', err.message);
-    console.log('👀 Raw log (unparsed):', log);
-    console.log('📝 Topics received:', log.topics);
-    console.log('📝 First topic (event signature):', log.topics[0]);
-    console.log('🔄 Continuing to listen for other events...');
-  }
-};
 
 // Add startup message
 console.log('🤖 ZKP2P Telegram Bot Started (Supabase Integration with Auto-Reconnect + Sniper)');
@@ -1983,34 +1773,6 @@ process.on('unhandledRejection', (reason, promise) => {
 // Graceful shutdown handlers
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Telegram Bot Message Handlers
-bot.onText(/\/searchdeposit (\d+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const depositId = parseInt(match[1]);
-
-  try {
-    // Initialize user in database
-    await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
-
-    // Show typing indicator
-    await bot.sendChatAction(chatId, 'typing');
-
-    // Import search and formatting functions
-    const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
-
-    // Search for deposit
-    const result = await searchDeposit(depositId);
-
-    // Format and send the message
-    const message = await formatTelegramMessage(result);
-    await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
-
-  } catch (error) {
-    console.error('Error in search deposit command:', error);
-    await bot.sendMessage(chatId, `❌ Error searching deposit: ${error.message}`);
-  }
-});
 
 // Health check interval
 setInterval(async () => {

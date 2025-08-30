@@ -228,7 +228,7 @@ async function formatTelegramMessage(result) {
       message += `• ${data.platform}\n`;
       if (data.currencies && data.currencies.length > 0) {
         for (const currency of data.currencies) {
-          const rate = (Number(currency.conversionRate)).toFixed(4);
+          const rate = (Number(currency.conversionRate)).toFixed(3);
 
           // Fetch current market rate for comparison
           let marketRateText = '';
@@ -243,7 +243,7 @@ async function formatTelegramMessage(result) {
               const markupPercentage = ((Number(currency.conversionRate) - marketRate) / marketRate) * 100;
 
               // Format market rate in blue
-              const marketRateFormatted = marketRate.toFixed(4);
+              const marketRateFormatted = marketRate.toFixed(3);
               rateText =`<b>${rate}</b>`;
               marketRateText = `${marketRateFormatted}`;
 
@@ -268,7 +268,7 @@ async function formatTelegramMessage(result) {
             markupText = 'N/A';
           }
 
-          message += `       ${currency.code} ${rateText} (Mkt: ${marketRateText}) (${markupText})\n`;
+          message += `${currency.code} ${rateText} (Mkt: ${marketRateText}) ${markupText}\n`;
         }
       }
     }
