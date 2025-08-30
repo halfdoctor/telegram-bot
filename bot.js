@@ -916,36 +916,39 @@ bot.on('callback_query', async (callbackQuery) => {
       const listeningAll = await db.getUserListenAll(chatId);
       const snipers = await db.getUserSnipers(chatId);
       const threshold = await db.getUserThreshold(chatId);
+      const userThreshold = await db.getUserDepositThreshold(chatId) || 0.25;
       
       let message = '📋 **Your Current Status:**\n\n';
       
       if (listeningAll) {
         message += `🌐 **Listening to ALL deposits**\n\n`;
       }
-      
-      if (snipers.length > 0) {
-        message += `🎯 **Active Snipers:** (${threshold}% threshold)\n`;
-        snipers.forEach(sniper => {
-          const platformText = sniper.platform ? ` on ${sniper.platform}` : ' (all platforms)';
-          message += `• ${sniper.currency}${platformText}\n`;
-        });
-        message += `\n`;
-      }
-      
+
       const idsArray = Array.from(userDeposits).sort((a, b) => a - b);
       if (idsArray.length > 0) {
-        message += `📊 **Tracking ${idsArray.length} specific deposits:**\n\n`;
+        message += `📊 **Tracking ${idsArray.length} deposits:**\n`;
         idsArray.slice(0, 10).forEach(id => { // Show max 10
           const state = userStates.get(id);
           const status = state ? state.status : 'tracking';
           const emoji = status === 'fulfilled' ? '✅' : 
                         status === 'pruned' ? '🟡' : '👀';
-          message += `${emoji} \`${id}\` - ${status}\n`;
+          message += `    ${emoji} \`${id}\` - ${status}\n`;
         });
         
         if (idsArray.length > 10) {
           message += `\n... and ${idsArray.length - 10} more\n`;
         }
+      }
+
+      message += `\n⚠️ **Deposit Alert Threshold:** ${userThreshold}%\n(If your tracked deposits are LESS than the market rate by this percentage, you will be notified. Checked 4 hourly.)`;
+      
+      if (snipers.length > 0) {
+        message += `\n\n🎯 **Active Snipers:** (${threshold}% threshold)\n`;
+        snipers.forEach(sniper => {
+          const platformText = sniper.platform ? ` on ${sniper.platform}` : ' (all platforms)';
+          message += `• ${sniper.currency}${platformText}\n`;
+        });
+        message += `\n`;
       }
       
       if (idsArray.length === 0 && !listeningAll && snipers.length === 0) {
