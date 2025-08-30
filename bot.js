@@ -1,634 +1,67 @@
-require('dotenv').config();
-const { WebSocketProvider, Interface } = require('ethers');
+require('dotenv').config({ path: __dirname + '/.env' });
 const TelegramBot = require('node-telegram-bot-api');
-const { createClient } = require('@supabase/supabase-js');
+const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
+const DatabaseManager = require('./scripts/database-manager.js');
+const { supabase } = require('./config.js');
+const { getExchangeRates } = require('./scripts/exchange-service.js');
+const express = require('express');
+const { getWeb3Service } = require('./scripts/web3-service.js')
+const { startDepositMonitor } = require('./scripts/deposit-monitor.js');
 
-// Supabase setup
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+// Add HTTP server for Render health checks
+const app = express();
+app.get('/', (req, res) => {
+  res.json({
+    status: 'Bot is running!',
+    uptime: process.uptime(),
+    websocket: web3Service?.isConnected || false
+  });
+});
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
 
-// Exchange rate API configuration
-const EXCHANGE_API_URL = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}/latest/USD`;
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    websocket: web3Service?.isConnected ? 'connected' : 'disconnected',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 Health check server running on port ${PORT}`);
+});
+
+// Import provider and contract from config module
+const { provider, escrowContract } = require('./config.js');
 
 const depositAmounts = new Map(); // Store deposit amounts temporarily
 const intentDetails = new Map();
 
-// Database helper functions
-class DatabaseManager {
-  // Helper function to format timestamps for PostgreSQL (without timezone)
-  _formatTimestamp(date) {
-    return date.toISOString().replace('T', ' ').replace('Z', '');
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+
+// Initialize web3 service for blockchain interactions
+let web3Service;
+const initializeWeb3Service = async () => {
+  try {
+    web3Service = getWeb3Service(process.env.BASE_WS_URL || 'wss://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY');
+    await web3Service.initialize();
+    console.log('✅ Web3Service initialized successfully');
+  } catch (error) {
+    console.error('❌ Failed to initialize Web3Service:', error);
   }
-  // Initialize user if not exists
-  async initUser(chatId, username = null, firstName = null, lastName = null) {
-    const { data, error } = await supabase
-      .from('users')
-      .upsert({ 
-        chat_id: chatId,
-        username: username,
-        first_name: firstName,
-        last_name: lastName,
-        last_active: new Date().toISOString() 
-      }, { 
-        onConflict: 'chat_id',
-        ignoreDuplicates: false 
-      });
-    
-    if (error) console.error('Error initializing user:', error);
-    return data;
-  }
+};
 
-  // Get user's ACTIVE tracked deposits only
-  async getUserDeposits(chatId) {
-    const { data, error } = await supabase
-      .from('user_deposits')
-      .select('deposit_id, status')
-      .eq('chat_id', chatId)
-      .eq('is_active', true); // Only get active deposits
-    
-    if (error) {
-      console.error('Error fetching user deposits:', error);
-      return new Set();
-    }
+// Initialize web3 service asynchronously
+initializeWeb3Service();
 
-    if (!data || data.length === 0) {
-      return new Set();
-    }
-
-    return new Set(data.map(row => parseInt(row.deposit_id)));
-  }
-
-  // Get user's ACTIVE deposit states only
-  async getUserDepositStates(chatId) {
-    const { data, error } = await supabase
-      .from('user_deposits')
-      .select('deposit_id, status, intent_hash')
-      .eq('chat_id', chatId)
-      .eq('is_active', true); // Only get active deposits
-    
-    if (error) {
-      console.error('Error fetching user deposit states:', error);
-      return new Map();
-    }
-
-    if (!data || data.length === 0) {
-      return new Map();
-    }
-
-    const statesMap = new Map();
-    data.forEach(row => {
-      statesMap.set(parseInt(row.deposit_id), {
-        status: row.status,
-        intentHash: row.intent_hash
-      });
-    });
-    
-    return statesMap;
-  }
-
-  // Add deposit for user (always creates as active)
-  async addUserDeposit(chatId, depositId) {
-    // Validate inputs
-    if (!chatId || !depositId) {
-      console.error('Error: Missing chatId or depositId');
-      return false;
-    }
-
-    // Ensure depositId is a valid integer
-    const depositIdInt = parseInt(depositId);
-    if (isNaN(depositIdInt) || depositIdInt <= 0) {
-      console.error('Error: Invalid depositId, must be a positive integer');
-      return false;
-    }
-
-    try {
-      // First, try to update existing record if it exists
-      const { data: updateData, error: updateError } = await supabase
-        .from('user_deposits')
-        .update({
-          status: 'tracking',
-          is_active: true,
-          updated_at: new Date().toISOString()
-        })
-        .eq('chat_id', chatId)
-        .eq('deposit_id', depositIdInt)
-        .select();
-
-      if (updateError) {
-        console.error('Error updating deposit:', updateError);
-        return false;
-      }
-
-      // If no rows were updated, insert a new record
-      if (!updateData || updateData.length === 0) {
-        const { data: insertData, error: insertError } = await supabase
-          .from('user_deposits')
-          .insert({
-            chat_id: chatId,
-            deposit_id: depositIdInt,
-            status: 'tracking',
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          });
-
-        if (insertError) {
-          console.error('Error inserting deposit:', insertError);
-          return false;
-        }
-      }
-
-      console.log(`✅ Successfully added deposit ${depositIdInt} for user ${chatId}`);
-      return true;
-
-    } catch (error) {
-      console.error('Error in addUserDeposit:', error);
-      return false;
-    }
-  }
-
-  // Remove deposit - mark as inactive instead of deleting
-  async removeUserDeposit(chatId, depositId) {
-    // Validate inputs
-    if (!chatId || !depositId) {
-      console.error('Error: Missing chatId or depositId');
-      return false;
-    }
-
-    // Ensure depositId is a valid integer
-    const depositIdInt = parseInt(depositId);
-    if (isNaN(depositIdInt) || depositIdInt <= 0) {
-      console.error('Error: Invalid depositId, must be a positive integer');
-      return false;
-    }
-
-    const { data, error } = await supabase
-      .from('user_deposits')
-      .update({
-        is_active: false,
-        updated_at: new Date().toISOString()
-      })
-      .eq('chat_id', chatId)
-      .eq('deposit_id', depositIdInt);
-
-    if (error) {
-      console.error('Error removing deposit:', error);
-      return false;
-    }
-
-    console.log(`✅ Successfully removed deposit ${depositIdInt} for user ${chatId}`);
-    return true;
-  }
-
-  // Update deposit status (only for active deposits)
-  async updateDepositStatus(chatId, depositId, status, intentHash = null) {
-    // Validate inputs
-    if (!chatId || !depositId || !status) {
-      console.error('Error: Missing chatId, depositId, or status');
-      return false;
-    }
-
-    // Ensure depositId is a valid integer
-    const depositIdInt = parseInt(depositId);
-    if (isNaN(depositIdInt) || depositIdInt <= 0) {
-      console.error('Error: Invalid depositId, must be a positive integer');
-      return false;
-    }
-
-    const updateData = {
-      status: status,
-      updated_at: new Date().toISOString()
-    };
-    
-    if (intentHash) {
-      updateData.intent_hash = intentHash;
-    }
-
-    const { data, error } = await supabase
-      .from('user_deposits')
-      .update(updateData)
-      .eq('chat_id', chatId)
-      .eq('deposit_id', depositIdInt)
-      .eq('is_active', true); // Only update active deposits
-
-    if (error) {
-      console.error('Error updating deposit status:', error);
-      return false;
-    }
-
-    console.log(`✅ Successfully updated deposit ${depositIdInt} status to ${status} for user ${chatId}`);
-    return true;
-  }
-
-  // Get ACTIVE listen all preference only
-  async getUserListenAll(chatId) {
-    const { data, error } = await supabase
-      .from('user_settings')
-      .select('listen_all')
-      .eq('chat_id', chatId)
-      .eq('is_active', true) // Only get active settings
-      .single();
-    
-    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
-      console.error('Error getting listen all:', error);
-    }
-    return data?.listen_all || false;
-  }
-
-  async setUserListenAll(chatId, listenAll) {
-    const { error } = await supabase
-      .from('user_settings')
-      .upsert({ 
-        chat_id: chatId, 
-        listen_all: listenAll,
-        is_active: true, // Always active when setting
-        updated_at: new Date().toISOString()
-      }, { 
-        onConflict: 'chat_id' 
-      });
-    
-    if (error) console.error('Error setting listen all:', error);
-  }
-
-  // Clear user data - mark as inactive (PRESERVES DATA FOR ANALYTICS)
-  async clearUserData(chatId) {
-    const timestamp = new Date().toISOString();
-    
-    // Mark deposits as inactive instead of deleting
-    const { error: error1 } = await supabase
-      .from('user_deposits')
-      .update({ 
-        is_active: false,
-        updated_at: timestamp
-      })
-      .eq('chat_id', chatId);
-    
-    // Mark settings as inactive instead of deleting  
-    const { error: error2 } = await supabase
-      .from('user_settings')
-      .update({ 
-        is_active: false,
-        updated_at: timestamp
-      })
-      .eq('chat_id', chatId);
-
-    // Clear sniper settings too
-    const now = new Date();
-    const sniperTimestamp = this._formatTimestamp(now);
-    const { error: error3 } = await supabase
-      .from('user_snipers')
-      .update({
-        is_active: false,
-        updated_at: sniperTimestamp
-      })
-      .eq('chat_id', chatId);
-    
-    if (error1) console.error('Error clearing user deposits:', error1);
-    if (error2) console.error('Error clearing user settings:', error2);
-    if (error3) console.error('Error clearing user snipers:', error3);
-  }
-
-  // Log event notification (for analytics)
-  async logEventNotification(chatId, depositId, eventType) {
-    const { error } = await supabase
-      .from('event_notifications')
-      .insert({
-        chat_id: chatId,
-        deposit_id: depositId,
-        event_type: eventType,
-        sent_at: new Date().toISOString()
-      });
-    
-    if (error) console.error('Error logging notification:', error);
-  }
-
-  // Get users interested in a deposit (only ACTIVE users/settings)
-  async getUsersInterestedInDeposit(depositId) {
-    // Users listening to all deposits (ACTIVE settings only)
-    const { data: allListeners } = await supabase
-      .from('user_settings')
-      .select('chat_id')
-      .eq('listen_all', true)
-      .eq('is_active', true); // Only active "listen all" users
-    
-    // Users tracking specific deposit (ACTIVE tracking only)
-    const { data: specificTrackers } = await supabase
-      .from('user_deposits')
-      .select('chat_id')
-      .eq('deposit_id', depositId)
-      .eq('is_active', true); // Only active deposit tracking
-    
-    const allUsers = new Set();
-    
-    allListeners?.forEach(user => allUsers.add(user.chat_id));
-    specificTrackers?.forEach(user => allUsers.add(user.chat_id));
-    
-    return Array.from(allUsers);
-  }
-
-  // BONUS: Analytics methods (new!)
-  async getAnalytics() {
-    // Total users who ever used the bot
-    const { data: totalUsers } = await supabase
-      .from('users')
-      .select('chat_id', { count: 'exact' });
-
-    // Currently active trackers
-    const { data: activeTrackers } = await supabase
-      .from('user_deposits')
-      .select('chat_id', { count: 'exact' })
-      .eq('is_active', true);
-
-    // Total tracking sessions (including cleared ones)
-    const { data: allTimeTracking } = await supabase
-      .from('user_deposits')
-      .select('chat_id', { count: 'exact' });
-
-    // Most tracked deposits
-    const { data: popularDeposits } = await supabase
-      .from('user_deposits')
-      .select('deposit_id')
-      .eq('is_active', true);
-
-    return {
-      totalUsers: totalUsers?.length || 0,
-      activeTrackers: activeTrackers?.length || 0,
-      allTimeTracking: allTimeTracking?.length || 0,
-      popularDeposits: popularDeposits || []
-    };
-  }
-  
-  async removeUserSniper(chatId, currency = null, platform = null) {
-    const now = new Date();
-    const timestamp = this._formatTimestamp(now);
-
-    let query = supabase
-      .from('user_snipers')
-      .update({
-        is_active: false,
-        updated_at: timestamp
-      })
-      .eq('chat_id', chatId);
-
-    if (currency) {
-      query = query.eq('currency', currency.toUpperCase());
-    }
-
-    if (platform) {
-      query = query.eq('platform', platform.toLowerCase());
-    }
-
-    const { error } = await query;
-    if (error) console.error('Error removing sniper:', error);
-  }
-
-  async setUserSniper(chatId, currency, platform = null) {
-    // Always insert - no deactivation needed
-    const now = new Date();
-    const timestamp = this._formatTimestamp(now);
-
-    // First, try to deactivate any existing snipers for this currency/platform combo
-    let deactivateQuery = supabase
-      .from('user_snipers')
-      .update({ is_active: false, updated_at: timestamp })
-      .eq('chat_id', chatId)
-      .eq('currency', currency.toUpperCase())
-      .eq('is_active', true);
-
-    if (platform !== null) {
-      deactivateQuery = deactivateQuery.eq('platform', platform.toLowerCase());
-    } else {
-      deactivateQuery = deactivateQuery.is('platform', null);
-    }
-
-    await deactivateQuery;
-
-    // Now insert the new sniper
-    const { error } = await supabase
-    .from('user_snipers')
-    .insert({
-      chat_id: chatId,
-      currency: currency.toUpperCase(),
-      platform: platform ? platform.toLowerCase() : null,
-      is_active: true,
-      created_at: timestamp,
-      updated_at: timestamp
-    });
-
-    if (error) {
-      console.error('Error setting sniper:', error);
-      return false;
-    }
-    return true;
-  }
-
-  async getUserSnipers(chatId) {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    // Format date to match PostgreSQL timestamp without time zone format
-    const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
-
-    const { data, error } = await supabase
-      .from('user_snipers')
-      .select('currency, platform, created_at')
-      .eq('chat_id', chatId)
-      .eq('is_active', true)
-      .gte('created_at', thirtyDaysAgoFormatted)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Error fetching user snipers:', error);
-      return [];
-    }
-
-    // Deduplicate - keep only the newest entry for each currency+platform combo
-    const unique = new Map();
-    data.forEach(row => {
-      const key = `${row.currency}-${row.platform ?? 'all'}`; // ← Add fallback for null
-      const existing = unique.get(key);
-      if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
-        unique.set(key, row);
-      }
-    });
-
-    return Array.from(unique.values());
-  }
-
-  async getUsersWithSniper(currency, platform = null) {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    // Format date to match PostgreSQL timestamp without time zone format
-    const thirtyDaysAgoFormatted = this._formatTimestamp(thirtyDaysAgo);
-
-    let query = supabase
-      .from('user_snipers')
-      .select('chat_id, currency, platform, created_at')
-      .eq('currency', currency.toUpperCase())
-      .gte('created_at', thirtyDaysAgoFormatted);
-
-    // If platform is specified, match exactly OR get users with null platform (all platforms)
-    if (platform) {
-      // Get users who either specified this platform OR want all platforms (null)
-      query = query.or(`platform.eq.${platform.toLowerCase()},platform.is.null`);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('Error fetching users with sniper:', error);
-      return [];
-    }
-
-    // Deduplicate by chat_id - if user has multiple entries, keep the newest
-    const userMap = new Map();
-    data.forEach(row => {
-      const existing = userMap.get(row.chat_id);
-      if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
-        userMap.set(row.chat_id, row);
-      }
-    });
-
-    return Array.from(userMap.keys()); // Return just the chat IDs
-  }
-
-  async logSniperAlert(chatId, depositId, currency, depositRate, marketRate, percentageDiff) {
-    const { error } = await supabase
-      .from('sniper_alerts')
-      .insert({
-        chat_id: chatId,
-        deposit_id: depositId,
-        currency: currency,
-        deposit_rate: depositRate,
-        market_rate: marketRate,
-        percentage_diff: percentageDiff,
-        sent_at: new Date().toISOString()
-      });
-    
-    if (error) console.error('Error logging sniper alert:', error);
-  }
-
-  async storeDepositAmount(depositId, amount) {
-    // Validate inputs
-    if (!depositId || !amount) {
-      console.error('Error: Missing depositId or amount');
-      return false;
-    }
-
-    // Ensure depositId is a valid integer (for deposit_amounts table which uses bigint)
-    const depositIdInt = parseInt(depositId);
-    if (isNaN(depositIdInt) || depositIdInt <= 0) {
-      console.error('Error: Invalid depositId, must be a positive integer');
-      return false;
-    }
-
-    // Ensure amount is a valid number
-    const amountNum = Number(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      console.error('Error: Invalid amount, must be a positive number');
-      return false;
-    }
-
-    // Store in memory for quick access (keep original decimal value)
-    depositAmounts.set(depositIdInt, amountNum);
-
-    // Convert to integer for database storage (multiply by 100 to store cents)
-    // This is because the schema defines amount as bigint, not decimal
-    const amountInt = Math.round(amountNum * 100);
-
-    // Also store in database for persistence
-    const { data, error } = await supabase
-      .from('deposit_amounts')
-      .upsert({
-        deposit_id: depositIdInt,
-        amount: amountInt,
-        created_at: new Date().toISOString()
-      }, {
-        onConflict: 'deposit_id'
-      });
-
-      if (error) {
-        console.error('Error storing deposit amount:', error);
-        return false;
-      }
-
-      console.log(`✅ Successfully stored amount ${amountNum} (as ${amountInt} cents) for deposit ${depositIdInt}`);
-      return true;
-  }
-
-  async getDepositAmount(depositId) {
-    // Validate input
-    if (!depositId) {
-      console.error('Error: Missing depositId');
-      return 0;
-    }
-
-    // Ensure depositId is a valid integer
-    const depositIdInt = parseInt(depositId);
-    if (isNaN(depositIdInt) || depositIdInt <= 0) {
-      console.error('Error: Invalid depositId, must be a positive integer');
-      return 0;
-    }
-
-    // Try memory first
-    const memoryAmount = depositAmounts.get(depositIdInt);
-    if (memoryAmount !== undefined) return memoryAmount;
-
-    // Fall back to database
-      const { data, error } = await supabase
-        .from('deposit_amounts')
-        .select('amount')
-        .eq('deposit_id', depositIdInt)
-        .single();
-
-      if (error) {
-        if (error.code !== 'PGRST116') { // PGRST116 = no rows returned
-          console.error('Error getting deposit amount:', error);
-        }
-        return 0;
-      }
-
-      // Convert from cents back to decimal
-      const storedAmount = data?.amount || 0;
-      return storedAmount / 100;
-  }
-  
-  // Get user's global sniper threshold
-  async getUserThreshold(chatId) {
-    const { data, error } = await supabase
-      .from('user_settings')
-      .select('threshold')
-      .eq('chat_id', chatId)
-      .eq('is_active', true)
-      .single();
-    
-    if (error && error.code !== 'PGRST116') {
-      console.error('Error getting user threshold:', error);
-    }
-    return data?.threshold || 0.2; // Default to 0.2% if not set
-  }
-
-  // Set user's global sniper threshold
-  async setUserThreshold(chatId, threshold) {
-    const { error } = await supabase
-      .from('user_settings')
-      .upsert({ 
-        chat_id: chatId, 
-        threshold: threshold,
-        is_active: true,
-        updated_at: new Date().toISOString()
-      }, { 
-        onConflict: 'chat_id' 
-      });
-    
-    if (error) console.error('Error setting user threshold:', error);
-  }
-  
-}
-
+// Make bot and provider available globally for web3-service notifications
+global.bot = bot;
+global.provider = provider;
 
 const db = new DatabaseManager();
 
@@ -689,20 +122,27 @@ const initializeBot = async () => {
     await db.setUserThreshold(ZKP2P_GROUP_ID, 0.1);
 
     console.log(`📤 Attempting to send message to topic ${ZKP2P_TOPIC_ID} in group ${ZKP2P_GROUP_ID}`);
-    
-    // Test message sending with better error handling
-    const result = await bot.sendMessage(ZKP2P_GROUP_ID, '🔄 Bot restarted and ready!', {
-      parse_mode: 'Markdown',
-      message_thread_id: ZKP2P_TOPIC_ID,
-    });
 
-    console.log('✅ Initialization message sent successfully!');
-    console.log('📋 Message details:', {
-      message_id: result.message_id,
-      chat_id: result.chat.id,
-      thread_id: result.message_thread_id,
-      is_topic_message: result.is_topic_message
-    });
+    // Test message sending with better error handling (optional)
+    try {
+      const result = await bot.sendMessage(ZKP2P_GROUP_ID, '🔄 Bot restarted and ready!', {
+        parse_mode: 'Markdown',
+        message_thread_id: ZKP2P_TOPIC_ID,
+      });
+
+      console.log('✅ Initialization message sent successfully!');
+      console.log('📋 Message details:', {
+        message_id: result.message_id,
+        chat_id: result.chat.id,
+        thread_id: result.message_thread_id,
+        is_topic_message: result.is_topic_message
+      });
+    } catch (telegramError) {
+      console.log('⚠️ Could not send initialization message to group (this is optional):', telegramError.message);
+      console.log('✅ Bot is still fully functional for individual users!');
+    }
+  // Start the deposit monitor
+  startDepositMonitor(bot);
     
   } catch (err) {
     console.error('❌ Bot initialization failed:', err);
@@ -722,709 +162,6 @@ const initializeBot = async () => {
 // Start initialization after a delay
 setTimeout(initializeBot, 3000);
 
-
-
-// Exchange rate fetcher
-let exchangeRatesCache = null;
-let lastRatesFetch = 0;
-const RATES_CACHE_DURATION = 60000; // 1 minute cache
-
-async function getExchangeRates() {
-  const now = Date.now();
-  
-  // Return cached rates if still fresh
-  if (exchangeRatesCache && (now - lastRatesFetch) < RATES_CACHE_DURATION) {
-    return exchangeRatesCache;
-  }
-  
-  try {
-    const response = await fetch(EXCHANGE_API_URL);
-    const data = await response.json();
-    
-    if (data.result === 'success') {
-      exchangeRatesCache = data.conversion_rates;
-      lastRatesFetch = now;
-      console.log('📊 Exchange rates updated');
-      return exchangeRatesCache;
-    } else {
-      console.error('❌ Exchange API error:', data);
-      return null;
-    }
-  } catch (error) {
-    console.error('❌ Failed to fetch exchange rates:', error);
-    return null;
-  }
-}
-
-
-// Enhanced WebSocket Provider with better connection stability
-class ResilientWebSocketProvider {
-  constructor(url, contractAddress, eventHandler) {
-    this.url = url;
-    this.contractAddress = contractAddress;
-    this.eventHandler = eventHandler;
-    this.reconnectDelay = 1000;
-    this.maxReconnectDelay = 30000;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 50;
-    this.isConnecting = false;
-    this.isDestroyed = false;
-    this.provider = null;
-    this.reconnectTimer = null;
-    this.keepAliveTimer = null; // Add keep-alive timer
-    this.lastActivityTime = Date.now();
-    
-    this.connect();
-  }
-
-  async connect() {
-    if (this.isConnecting || this.isDestroyed) return;
-    this.isConnecting = true;
-
-    try {
-      console.log(`🔌 Attempting WebSocket connection (attempt ${this.reconnectAttempts + 1})`);
-      
-      // Properly cleanup existing provider
-      if (this.provider) {
-        await this.cleanup();
-      }
-
-      // Add connection options for better stability
-      this.provider = new WebSocketProvider(this.url, undefined, {
-        // Add connection options
-        reconnectInterval: 5000,
-        maxReconnectInterval: 30000,
-        reconnectDecay: 1.5,
-        timeoutInterval: 10000,
-        maxReconnectAttempts: null, // We handle this ourselves
-        debug: false
-      });
-
-      this.setupEventListeners();
-      
-      // Test connection with timeout
-      const networkPromise = this.provider.getNetwork();
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Connection timeout')), 15000) // Increased timeout
-      );
-      
-      await Promise.race([networkPromise, timeoutPromise]);
-      
-      console.log('✅ WebSocket connected successfully');
-      this.lastActivityTime = Date.now();
-      
-      this.reconnectAttempts = 0;
-      this.reconnectDelay = 1000;
-      this.isConnecting = false;
-      
-      this.setupContractListening();
-      this.startKeepAlive(); // Start keep-alive mechanism
-      
-    } catch (error) {
-      console.error('❌ WebSocket connection failed:', error.message);
-      this.isConnecting = false;
-      
-      // Only schedule reconnect if not destroyed
-      if (!this.isDestroyed) {
-        this.scheduleReconnect();
-      }
-    }
-  }
-
-  async cleanup() {
-    if (this.provider) {
-      try {
-        // Stop keep-alive first
-        this.stopKeepAlive();
-        
-        // Remove all listeners first
-        this.provider.removeAllListeners();
-        
-        // Close WebSocket connection if it exists
-        if (this.provider._websocket) {
-          this.provider._websocket.removeAllListeners();
-          if (this.provider._websocket.readyState === 1) { // OPEN
-            this.provider._websocket.close(1000, 'Normal closure'); // Proper close code
-          }
-        }
-        
-        // Destroy provider
-        if (typeof this.provider.destroy === 'function') {
-          await this.provider.destroy();
-        }
-        
-        console.log('🧹 Cleaned up existing provider');
-      } catch (error) {
-        console.error('⚠️ Error during cleanup:', error.message);
-      }
-    }
-  }
-
-  setupEventListeners() {
-    if (!this.provider || this.isDestroyed) return;
-    
-    if (this.provider._websocket) {
-      this.provider._websocket.on('close', (code, reason) => {
-        console.log(`🔌 WebSocket closed: ${code} - ${reason}`);
-        this.stopKeepAlive();
-        if (!this.isDestroyed) {
-          // Add delay before reconnecting to avoid rapid reconnections
-          setTimeout(() => {
-            if (!this.isDestroyed) {
-              this.scheduleReconnect();
-            }
-          }, 2000);
-        }
-      });
-  
-      this.provider._websocket.on('error', (error) => {
-        console.error('❌ WebSocket error:', error.message);
-        this.stopKeepAlive();
-        if (!this.isDestroyed) {
-          this.scheduleReconnect();
-        }
-      });
-
-      // Enhanced ping/pong handling
-      this.provider._websocket.on('ping', (data) => {
-        console.log('🏓 WebSocket ping received');
-        this.lastActivityTime = Date.now();
-        this.provider._websocket.pong(data); // Respond to ping
-      });
-
-      this.provider._websocket.on('pong', () => {
-        console.log('🏓 WebSocket pong received');
-        this.lastActivityTime = Date.now();
-      });
-
-      // Track any message activity
-      this.provider._websocket.on('message', () => {
-        this.lastActivityTime = Date.now();
-      });
-    }
-
-    // Listen for provider events too
-    this.provider.on('error', (error) => {
-      console.error('❌ Provider error:', error.message);
-      if (!this.isDestroyed) {
-        this.scheduleReconnect();
-      }
-    });
-  }
-
-  startKeepAlive() {
-    this.stopKeepAlive(); // Clear any existing timer
-    
-    // Send ping every 30 seconds to keep connection alive
-    this.keepAliveTimer = setInterval(() => {
-      if (this.provider && this.provider._websocket && this.provider._websocket.readyState === 1) {
-        try {
-          this.provider._websocket.ping();
-          console.log('🏓 Sent keep-alive ping');
-          
-          // Check if we haven't received any activity in 90 seconds
-          const timeSinceActivity = Date.now() - this.lastActivityTime;
-          if (timeSinceActivity > 90000) {
-            console.log('⚠️ No activity for 90 seconds, forcing reconnection');
-            this.scheduleReconnect();
-          }
-        } catch (error) {
-          console.error('❌ Keep-alive ping failed:', error.message);
-          this.scheduleReconnect();
-        }
-      }
-    }, 30000); // 30 seconds
-  }
-
-  stopKeepAlive() {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
-  }
-
-  setupContractListening() {
-    if (!this.provider || this.isDestroyed) return;
-    
-    try {
-      // Add error handling for the event listener
-      this.provider.on({ address: this.contractAddress.toLowerCase() }, (log) => {
-        this.lastActivityTime = Date.now(); // Update activity time on events
-        this.eventHandler(log);
-      });
-      
-      console.log(`👂 Listening for events on contract: ${this.contractAddress}`);
-    } catch (error) {
-      console.error('❌ Failed to set up contract listening:', error.message);
-      if (!this.isDestroyed) {
-        this.scheduleReconnect();
-      }
-    }
-  }
-
-  scheduleReconnect() {
-    if (this.isConnecting || this.isDestroyed) return;
-    
-    // Clear existing timer if any
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-    }
-    
-    this.stopKeepAlive(); // Stop keep-alive during reconnection
-    
-    this.reconnectAttempts++;
-    
-    if (this.reconnectAttempts > this.maxReconnectAttempts) {
-      console.error(`💀 Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping.`);
-      return;
-    }
-
-    const delay = Math.min(
-      this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts), 
-      this.maxReconnectDelay
-    );
-    
-    console.log(`⏰ Scheduling reconnection in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    
-    this.reconnectTimer = setTimeout(() => {
-      if (!this.isDestroyed) {
-        this.connect();
-      }
-    }, delay);
-  }
-
-  // Add manual restart method
-  async restart() {
-    console.log('🔄 Manual restart initiated...');
-    this.reconnectAttempts = 0;
-    this.reconnectDelay = 1000;
-    
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    
-    this.stopKeepAlive();
-    await this.cleanup();
-    
-    // Wait a bit before reconnecting
-    setTimeout(() => {
-      if (!this.isDestroyed) {
-        this.connect();
-      }
-    }, 3000); // Increased delay
-  }
-
-  // Add proper destroy method
-  async destroy() {
-    console.log('🛑 Destroying WebSocket provider...');
-    this.isDestroyed = true;
-    
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    
-    this.stopKeepAlive();
-    await this.cleanup();
-    this.provider = null;
-  }
-
-  get currentProvider() {
-    return this.provider;
-  }
-
-  get isConnected() {
-    return this.provider && 
-           this.provider._websocket && 
-           this.provider._websocket.readyState === 1 && // WebSocket.OPEN
-           (Date.now() - this.lastActivityTime) < 120000; // Active within 2 minutes
-  }
-}
-
-
-// ZKP2P Escrow contract on Base
-const contractAddress = '0xca38607d85e8f6294dc10728669605e6664c2d70';
-
-// ABI with exact event definitions from the contract (including sniper events)
-const abi = [
-  `event IntentSignaled(
-    bytes32 indexed intentHash,
-    uint256 indexed depositId,
-    address indexed verifier,
-    address owner,
-    address to,
-    uint256 amount,
-    bytes32 fiatCurrency,
-    uint256 conversionRate,
-    uint256 timestamp
-  )`,
-  `event IntentFulfilled(
-    bytes32 indexed intentHash,
-    uint256 indexed depositId,
-    address indexed verifier,
-    address owner,
-    address to,
-    uint256 amount,
-    uint256 sustainabilityFee,
-    uint256 verifierFee
-  )`,
-  `event IntentPruned(
-    bytes32 indexed intentHash,
-    uint256 indexed depositId
-  )`,
-  `event DepositReceived(
-    uint256 indexed depositId,
-    address indexed depositor,  
-    address indexed token,
-    uint256 amount,
-    tuple(uint256,uint256) intentAmountRange
-  )`,
-  `event DepositCurrencyAdded(
-    uint256 indexed depositId,
-    address indexed verifier,
-    bytes32 indexed currency,
-    uint256 conversionRate
-  )`,
-  `event DepositVerifierAdded(
-    uint256 indexed depositId,
-    address indexed verifier,
-    bytes32 indexed payeeDetailsHash,
-    address intentGatingService
-  )`,
-  `event DepositWithdrawn(
-    uint256 indexed depositId,
-    address indexed depositor,
-    uint256 amount
-  )`,
-  `event DepositClosed(
-    uint256 depositId,
-    address depositor
-  )`,
-  `event DepositCurrencyRateUpdated(
-    uint256 indexed depositId,
-    address indexed verifier,
-    bytes32 indexed currency,
-    uint256 conversionRate
-  )`,
-  `event BeforeExecution()`,
-  `event UserOperationEvent(
-    bytes32 indexed userOpHash,
-    address indexed sender,
-    address indexed paymaster,
-    uint256 nonce,
-    bool success,
-    uint256 actualGasCost,
-    uint256 actualGasUsed
-)`,
-`event DepositConversionRateUpdated(
-  uint256 indexed depositId,
-  address indexed verifier,
-  bytes32 indexed currency,
-  uint256 newConversionRate
-)`
-];
-
-const iface = new Interface(abi);
-const pendingTransactions = new Map(); // txHash -> {fulfilled: Set, pruned: Set, blockNumber: number, rawIntents: Map}
-const processingScheduled = new Set(); // Track which transactions are scheduled for processing
-
-function scheduleTransactionProcessing(txHash) {
-  if (processingScheduled.has(txHash)) return; // Already scheduled
-  
-  processingScheduled.add(txHash);
-  
-  setTimeout(async () => {
-    await processCompletedTransaction(txHash);
-    processingScheduled.delete(txHash);
-  }, 3000); // Wait 3 seconds for all events to arrive
-}
-
-async function processCompletedTransaction(txHash) {
-  const txData = pendingTransactions.get(txHash);
-  if (!txData) return;
-  
-  console.log(`🔄 Processing completed transaction ${txHash}`);
-  
-  // Process pruned intents first, but skip if also fulfilled
-  for (const intentHash of txData.pruned) {
-    if (txData.fulfilled.has(intentHash)) {
-      console.log(`Intent ${intentHash} was both pruned and fulfilled in tx ${txHash}, prioritizing fulfilled status`);
-      continue; // Skip sending pruned notification
-    }
-    
-    // Send pruned notification
-    const rawIntent = txData.rawIntents.get(intentHash);
-    if (rawIntent) {
-      await sendPrunedNotification(rawIntent, txHash);
-    }
-  }
-  
-  // Process fulfilled intents
-  for (const intentHash of txData.fulfilled) {
-    const rawIntent = txData.rawIntents.get(intentHash);
-    if (rawIntent) {
-      await sendFulfilledNotification(rawIntent, txHash);
-    }
-  }
-  
-  // Clean up
-  pendingTransactions.delete(txHash);
-}
-
-async function sendFulfilledNotification(rawIntent, txHash) {
-  const { depositId, verifier, owner, to, amount, sustainabilityFee, verifierFee, intentHash } = rawIntent;
-  const platformName = getPlatformName(verifier);
-
-  const storedDetails = intentDetails.get(intentHash.toLowerCase());
-  let rateText = '';
-  if (storedDetails) {
-    const fiatCode = getFiatCode(storedDetails.fiatCurrency);
-    const formattedRate = formatConversionRate(storedDetails.conversionRate, fiatCode);
-    rateText = `\n- *Rate:* ${formattedRate}`;
-  
-  // Clean up memory after use
-  intentDetails.delete(intentHash.toLowerCase());
-  }
-  
-  const interestedUsers = await db.getUsersInterestedInDeposit(depositId);
-  if (interestedUsers.length === 0) return;
-  
-  console.log(`📤 Sending fulfillment to ${interestedUsers.length} users interested in deposit ${depositId}`);
-  
-  const message = `
-🟢 *Order Fulfilled*
-- *Deposit ID:* \`${depositId}\`
-- *Order ID:* \`${intentHash}\`
-- *Platform:* ${platformName}
-- *Owner:* \`${owner}\`
-- *To:* \`${to}\`
-- *Amount:* ${formatUSDC(amount)} USDC${rateText}
-- *Sustainability Fee:* ${formatUSDC(sustainabilityFee)} USDC
-- *Verifier Fee:* ${formatUSDC(verifierFee)} USDC
-- *Tx:* [View on BaseScan](${txLink(txHash)})
-`.trim();
-
-  for (const chatId of interestedUsers) {
-    await db.updateDepositStatus(chatId, depositId, 'fulfilled', intentHash);
-    await db.logEventNotification(chatId, depositId, 'fulfilled');
-    
-    const sendOptions = { 
-      parse_mode: 'Markdown', 
-      disable_web_page_preview: true,
-      reply_markup: createDepositKeyboard(depositId)
-    };
-    if (chatId === ZKP2P_GROUP_ID) {
-      sendOptions.message_thread_id = ZKP2P_TOPIC_ID;
-    }
-    bot.sendMessage(chatId, message, sendOptions);
-  }
-}
-
-async function sendPrunedNotification(rawIntent, txHash) {
-  const { depositId, intentHash } = rawIntent;
-  
-  const interestedUsers = await db.getUsersInterestedInDeposit(depositId);
-  if (interestedUsers.length === 0) return;
-  
-  console.log(`📤 Sending cancellation to ${interestedUsers.length} users interested in deposit ${depositId}`);
-  
-  const message = `
-🟠 *Order Cancelled*
-- *Deposit ID:* \`${depositId}\`
-- *Order ID:* \`${intentHash}\`
-- *Tx:* [View on BaseScan](${txLink(txHash)})
-
-*Order was cancelled*
-`.trim();
-
-  for (const chatId of interestedUsers) {
-    await db.updateDepositStatus(chatId, depositId, 'pruned', intentHash);
-    await db.logEventNotification(chatId, depositId, 'pruned');
-    
-    const sendOptions = { 
-      parse_mode: 'Markdown', 
-      disable_web_page_preview: true,
-      reply_markup: createDepositKeyboard(depositId)
-    };
-    if (chatId === ZKP2P_GROUP_ID) {
-      sendOptions.message_thread_id = ZKP2P_TOPIC_ID;
-    }
-    bot.sendMessage(chatId, message, sendOptions);
-  }
-}
-
-
-
-// Verifier address to platform mapping
-const verifierMapping = {
-  '0x76d33a33068d86016b806df02376ddbb23dd3703': { platform: 'cashapp', isUsdOnly: true },
-  '0x9a733b55a875d0db4915c6b36350b24f8ab99df5': { platform: 'venmo', isUsdOnly: true },
-  '0xaa5a1b62b01781e789c900d616300717cd9a41ab': { platform: 'revolut', isUsdOnly: false },
-  '0xff0149799631d7a5bde2e7ea9b306c42b3d9a9ca': { platform: 'wise', isUsdOnly: false },
-  '0x03d17e9371c858072e171276979f6b44571c5dea': { platform: 'paypal', isUsdOnly: false },
-  '0x0de46433bd251027f73ed8f28e01ef05da36a2e0': { platform: 'monzo', isUsdOnly: false },
-  '0xf2ac5be14f32cbe6a613cff8931d95460d6c33a3': { platform: 'mercadopago', isUsdOnly: false },
-  '0x431a078a5029146aab239c768a615cd484519af7': { platform: 'zelle', isUsdOnly: true }
-
-};
-
-const getPlatformName = (verifierAddress) => {
-  const mapping = verifierMapping[verifierAddress.toLowerCase()];
-  return mapping ? mapping.platform : `Unknown (${verifierAddress.slice(0, 6)}...${verifierAddress.slice(-4)})`;
-};
-
-// Helper functions
-const formatUSDC = (amount) => (Number(amount) / 1e6).toFixed(2);
-const formatTimestamp = (ts) => new Date(Number(ts) * 1000).toUTCString();
-const txLink = (hash) => `https://basescan.org/tx/${hash}`;
-const depositLink = (id) => `https://www.zkp2p.xyz/deposit/${id}`;
-
-const currencyHashToCode = {
-  '0x4dab77a640748de8588de6834d814a344372b205265984b969f3e97060955bfa': 'AED',
-  '0x8fd50654b7dd2dc839f7cab32800ba0c6f7f66e1ccf89b21c09405469c2175ec': 'ARS',
-  '0xcb83cbb58eaa5007af6cad99939e4581c1e1b50d65609c30f303983301524ef3': 'AUD',
-  '0x221012e06ebf59a20b82e3003cf5d6ee973d9008bdb6e2f604faa89a27235522': 'CAD',
-  '0xc9d84274fd58aa177cabff54611546051b74ad658b939babaad6282500300d36': 'CHF',
-  '0xfaaa9c7b2f09d6a1b0971574d43ca62c3e40723167c09830ec33f06cec921381': 'CNY',
-  '0xd783b199124f01e5d0dde2b7fc01b925e699caea84eae3ca92ed17377f498e97': 'CZK',
-  '0x5ce3aa5f4510edaea40373cbe83c091980b5c92179243fe926cb280ff07d403e': 'DKK',
-  '0xfff16d60be267153303bbfa66e593fb8d06e24ea5ef24b6acca5224c2ca6b907': 'EUR',
-  '0x90832e2dc3221e4d56977c1aa8f6a6706b9ad6542fbbdaac13097d0fa5e42e67': 'GBP',
-  '0xa156dad863111eeb529c4b3a2a30ad40e6dcff3b27d8f282f82996e58eee7e7d': 'HKD',
-  '0x7766ee347dd7c4a6d5a55342d89e8848774567bcf7a5f59c3e82025dbde3babb': 'HUF',
-  '0xc681c4652bae8bd4b59bec1cdb90f868d93cc9896af9862b196843f54bf254b3': 'IDR',
-  '0x313eda7ae1b79890307d32a78ed869290aeb24cc0e8605157d7e7f5a69fea425': 'ILS',
-  '0xaad766fbc07fb357bed9fd8b03b935f2f71fe29fc48f08274bc2a01d7f642afc': 'INR',
-  '0xfe13aafd831cb225dfce3f6431b34b5b17426b6bff4fccabe4bbe0fe4adc0452': 'JPY',
-  '0x589be49821419c9c2fbb26087748bf3420a5c13b45349828f5cac24c58bbaa7b': 'KES',
-  '0xa94b0702860cb929d0ee0c60504dd565775a058bf1d2a2df074c1db0a66ad582': 'MXN',
-  '0xf20379023279e1d79243d2c491be8632c07cfb116be9d8194013fb4739461b84': 'MYR',
-  '0x8fb505ed75d9d38475c70bac2c3ea62d45335173a71b2e4936bd9f05bf0ddfea': 'NOK',
-  '0xdbd9d34f382e9f6ae078447a655e0816927c7c3edec70bd107de1d34cb15172e': 'NZD',
-  '0xe6c11ead4ee5ff5174861adb55f3e8fb2841cca69bf2612a222d3e8317b6ae06': 'PHP',
-  '0x9a788fb083188ba1dfb938605bc4ce3579d2e085989490aca8f73b23214b7c1d': 'PLN',
-  '0x2dd272ddce846149d92496b4c3e677504aec8d5e6aab5908b25c9fe0a797e25f': 'RON',
-  '0xf998cbeba8b7a7e91d4c469e5fb370cdfa16bd50aea760435dc346008d78ed1f': 'SAR',
-  '0x8895743a31faedaa74150e89d06d281990a1909688b82906f0eb858b37f82190': 'SEK',
-  '0xc241cc1f9752d2d53d1ab67189223a3f330e48b75f73ebf86f50b2c78fe8df88': 'SGD',
-  '0x326a6608c2a353275bd8d64db53a9d772c1d9a5bc8bfd19dfc8242274d1e9dd4': 'THB',
-  '0x128d6c262d1afe2351c6e93ceea68e00992708cfcbc0688408b9a23c0c543db2': 'TRY',
-  '0xc4ae21aac0c6549d71dd96035b7e0bdb6c79ebdba8891b666115bc976d16a29e': 'USD',
-  '0xe85548baf0a6732cfcc7fc016ce4fd35ce0a1877057cfec6e166af4f106a3728': 'VND',
-  '0x53611f0b3535a2cfc4b8deb57fa961ca36c7b2c272dfe4cb239a29c48e549361': 'ZAR'
-};
-
-const getFiatCode = (hash) => currencyHashToCode[hash.toLowerCase()] || '❓ Unknown';
-
-const formatConversionRate = (conversionRate, fiatCode) => {
-  const rate = (Number(conversionRate) / 1e18).toFixed(6);
-  return `${rate} ${fiatCode} / USDC`;
-};
-
-// const createDepositKeyboard = (depositId) => {
-//   return {
-//     inline_keyboard: [[
-//       {
-//         text: `🔗 View Deposit ${depositId}`,
-//         url: depositLink(depositId)
-//       }
-//     ]]
-//   };
-// };
-
-// Sniper logic
-async function checkSniperOpportunity(depositId, depositAmount, currencyHash, conversionRate, verifierAddress) {
-  const currencyCode = currencyHashToCode[currencyHash.toLowerCase()];
-  const platformName = getPlatformName(verifierAddress).toLowerCase();
-
-  if (!currencyCode) return; // Only skip unknown currencies
-  
-  console.log(`🎯 Checking sniper opportunity for deposit ${depositId}, currency: ${currencyCode}`);
-  
-  // Get current exchange rates
-  const exchangeRates = await getExchangeRates();
-  if (!exchangeRates) {
-    console.log('❌ No exchange rates available for sniper check');
-    return;
-  }
-  
-  // For USD, market rate is always 1.0 - better to hardcode than to call the api (i guess)
-  const marketRate = currencyCode === 'USD' ? 1.0 : exchangeRates[currencyCode];
-  if (!marketRate) {
-    console.log(`❌ No market rate found for ${currencyCode}`);
-    return;
-  }
-  
-  // Calculate rates
-  const depositRate = Number(conversionRate) / 1e18; // Convert from wei
-  const percentageDiff = ((marketRate - depositRate) / marketRate) * 100;
-  
-  console.log(`📊 Market rate: ${marketRate} ${currencyCode}/USD`);
-  console.log(`📊 Deposit rate: ${depositRate} ${currencyCode}/USD`);
-  console.log(`📊 Percentage difference: ${percentageDiff.toFixed(2)}%`);
-  
-// Get users with their custom thresholds and check each one individually
-const interestedUsers = await db.getUsersWithSniper(currencyCode, platformName);
-
-if (!interestedUsers.includes(ZKP2P_GROUP_ID)) {
-  interestedUsers.push(ZKP2P_GROUP_ID);
-}
-
-if (interestedUsers.length > 0) {
-  console.log(`🎯 Checking thresholds for ${interestedUsers.length} potential users`);
-  
-  for (const chatId of interestedUsers) {
-    const userThreshold = await db.getUserThreshold(chatId);
-    
-    if (percentageDiff >= userThreshold) {
-      console.log(`🎯 SNIPER OPPORTUNITY for user ${chatId}! ${percentageDiff.toFixed(2)}% >= ${userThreshold}%`);
-      
-      const formattedAmount = (Number(depositAmount) / 1e6).toFixed(2);
-      const message = `
-🎯 *SNIPER ALERT - ${currencyCode}*
-🏦 *Platform:* ${platformName}
-📊 New Deposit #${depositId}: ${formattedAmount} USDC
-💰 Deposit Rate: ${depositRate.toFixed(4)} ${currencyCode}/USD
-📈 Market Rate: ${marketRate.toFixed(4)} ${currencyCode}/USD  
-🔥 ${percentageDiff.toFixed(1)}% BETTER than market!
-
-💵 *If you filled this entire order:*
-- You'd pay: ${(Number(depositAmount) / 1e6 * depositRate).toFixed(2)} ${currencyCode}
-- Market cost: ${(Number(depositAmount) / 1e6 * marketRate).toFixed(2)} ${currencyCode}
-- **You save: ${((Number(depositAmount) / 1e6) * (marketRate - depositRate)).toFixed(2)} ${currencyCode}**
-
-*You get ${currencyCode} at ${percentageDiff.toFixed(1)}% discount on ${platformName}!*
-`.trim();
-
-      await db.logSniperAlert(chatId, depositId, currencyCode, depositRate, marketRate, percentageDiff);
-      
-const sendOptions = { 
-  parse_mode: 'Markdown',
-  reply_markup: {
-    inline_keyboard: [[
-      {
-        text: `🔗 Snipe Deposit ${depositId}`,
-        url: depositLink(depositId)
-      }
-    ]]
-  }
-};
-
-// Send sniper messages to the sniper topic
-if (chatId === ZKP2P_GROUP_ID) {
-  sendOptions.message_thread_id = ZKP2P_SNIPER_TOPIC_ID;
-}
-
-bot.sendMessage(chatId, message, sendOptions);
-    } else {
-      console.log(`📊 No opportunity for user ${chatId}: ${percentageDiff.toFixed(2)}% < ${userThreshold}%`);
-    }
-  }
-} else {
-  console.log(`📊 No users interested in sniping ${currencyCode} on ${platformName}`);
-}
-}
   
 
 // Telegram commands - now using database
@@ -1436,24 +173,12 @@ bot.onText(/\/deposit (.+)/, async (msg, match) => {
   await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
   
   if (input === 'all') {
-    // Check if this is a group chat and user is not admin
-    if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
-      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
-      return;
-    }
-  
     await db.setUserListenAll(chatId, true);
     bot.sendMessage(chatId, `🌍 *Now listening to ALL deposits!*\n\nYou will receive notifications for every event on every deposit.\n\nUse \`/deposit stop\` to stop listening to all deposits.`, { parse_mode: 'Markdown' });
     return;
   }
-  
+
   if (input === 'stop') {
-    // Check if this is a group chat and user is not admin
-    if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
-      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
-      return;
-    }
-  
     await db.setUserListenAll(chatId, false);
     bot.sendMessage(chatId, `🛑 *Stopped listening to all deposits.*\n\nYou will now only receive notifications for specifically tracked deposits.`, { parse_mode: 'Markdown' });
     return;
@@ -1575,11 +300,11 @@ bot.onText(/\/clearall/, async (msg) => {
 
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
-  
+
   try {
-    const wsConnected = resilientProvider?.isConnected || false;
+    const wsConnected = web3Service?.isConnected || false;
     const wsStatus = wsConnected ? '🟢 Connected' : '🔴 Disconnected';
-    
+
     // Test database connection
     let dbStatus = '🔴 Disconnected';
     try {
@@ -1588,7 +313,7 @@ bot.onText(/\/status/, async (msg) => {
     } catch (error) {
       console.error('Database test failed:', error);
     }
-    
+
     // Test Telegram connection
     let botStatus = '🔴 Disconnected';
     try {
@@ -1597,23 +322,23 @@ bot.onText(/\/status/, async (msg) => {
     } catch (error) {
       console.error('Bot test failed:', error);
     }
-    
+
     const listeningAll = await db.getUserListenAll(chatId);
     const trackedCount = (await db.getUserDeposits(chatId)).size;
     const snipers = await db.getUserSnipers(chatId);
-    
+
     let message = `🔧 *System Status:*\n\n`;
     message += `• *WebSocket:* ${wsStatus}\n`;
     message += `• *Database:* ${dbStatus}\n`;
     message += `• *Telegram:* ${botStatus}\n\n`;
     message += `📊 *Your Settings:*\n`;
-    
+
     if (listeningAll) {
       message += `• *Listening to:* ALL deposits\n`;
     } else {
       message += `• *Tracking:* ${trackedCount} specific deposits\n`;
     }
-    
+
     if (snipers.length > 0) {
       message += `• *Sniping:* `;
       const sniperTexts = snipers.map(sniper => {
@@ -1622,14 +347,15 @@ bot.onText(/\/status/, async (msg) => {
       });
       message += `${sniperTexts.join(', ')}\n`;
     }
-    
+
     // Add reconnection info if disconnected
-    if (!wsConnected && resilientProvider) {
-      message += `\n⚠️ *WebSocket reconnection attempts:* ${resilientProvider.reconnectAttempts}/${resilientProvider.maxReconnectAttempts}`;
+    if (!wsConnected && web3Service) {
+      // Note: We don't expose reconnectAttempts in the current web3Service API
+      message += `\n⚠️ *WebSocket:* Disconnected`;
     }
-    
+
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    
+
   } catch (error) {
     console.error('Status command failed:', error);
     bot.sendMessage(chatId, '❌ Failed to get status', { parse_mode: 'Markdown' });
@@ -1742,6 +468,19 @@ bot.onText(/\/unsnipe (.+)/, async (msg, match) => {
   bot.sendMessage(chatId, `🎯 Stopped sniping ${currency}${platformText}.`, { parse_mode: 'Markdown' });
 });
 
+bot.onText(/\/depositthreshold (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const threshold = parseFloat(match[1]);
+
+  if (isNaN(threshold)) {
+    bot.sendMessage(chatId, 'Invalid threshold. Please provide a number.');
+    return;
+  }
+
+  await db.setUserDepositThreshold(chatId, threshold);
+  bot.sendMessage(chatId, `Deposit alert threshold set to ${threshold}%.`);
+});
+
 // Menu creation functions
 const createMainMenu = () => {
   return {
@@ -1770,6 +509,9 @@ const createDepositMenu = () => {
       ],
       [
         { text: '🛑 Stop Listening to All', callback_data: 'action_deposit_stop' }
+      ],
+      [
+        { text: '🔍 Search Specific Deposit', callback_data: 'prompt_deposit_search' }
       ],
       [
         { text: '➕ Track Specific Deposit', callback_data: 'prompt_deposit_add' }
@@ -1813,7 +555,10 @@ const createSettingsMenu = () => {
   return {
     inline_keyboard: [
       [
-        { text: '🗑️ Clear All Data', callback_data: 'confirm_clearall' }
+        { text: '📊 Set Deposit Alert Threshold', callback_data: 'prompt_deposit_threshold' }
+      ],
+      [
+        { text: '�️ Clear All Data', callback_data: 'confirm_clearall' }
       ],
       [
         { text: '🔄 Refresh Status', callback_data: 'action_status' }
@@ -1921,7 +666,7 @@ Choose an option below to begin:
 bot.onText(/\/menu/, (msg) => {
   const chatId = msg.chat.id;
   
-  bot.sendMessage(chatId, '📋 **Main Menu**\n\nChoose what you\'d like to do:', {
+  bot.sendMessage(chatId, '📋 **ZKP2P Monitoring Bot**\n\nHow may I assist you?', {
     parse_mode: 'Markdown',
     reply_markup: createMainMenu()
   });
@@ -1995,6 +740,20 @@ bot.on('callback_query', async (callbackQuery) => {
       });
     }
 
+    else if (data === 'prompt_deposit_search') {
+      userStates.set(chatId, { action: 'waiting_search_add', messageId });
+      await bot.editMessageText('🔍 **Search info about a Deposit**\n\n**Please send the deposit ID below.**\n\nYou can also use the command `/searchdeposit <id>` to search information about a specific deposit:\n\nExamples:\n`123` - search for deposit 123\nOr\n/searchdeposit 123\n', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '❌ Cancel', callback_data: 'menu_deposits' }
+          ]]
+        }
+      });
+    }
+
     // Handle prompts for user input
     else if (data === 'prompt_deposit_add') {
       userStates.set(chatId, { action: 'waiting_deposit_add', messageId });
@@ -2012,7 +771,7 @@ bot.on('callback_query', async (callbackQuery) => {
     
     else if (data === 'prompt_deposit_remove') {
       userStates.set(chatId, { action: 'waiting_deposit_remove', messageId });
-      await bot.editMessageText('➖ **Remove Specific Deposit**\n\nPlease send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:', {
+      await bot.editMessageText('➖ **Remove Tracking**\n\nPlease send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:', {
         chat_id: chatId,
         message_id: messageId,
         parse_mode: 'Markdown',
@@ -2243,7 +1002,7 @@ Questions? The menu system makes everything easier! 🚀
 
     // Handle status action  
     else if (data === 'action_status') {
-      const wsConnected = resilientProvider?.isConnected || false;
+      const wsConnected = web3Service?.isConnected || false;
       const wsStatus = wsConnected ? '🟢 Connected' : '🔴 Disconnected';
       
       let dbStatus = '🔴 Disconnected';
@@ -2267,8 +1026,8 @@ Questions? The menu system makes everything easier! 🚀
       message += `• **Database:** ${dbStatus}\n`;
       message += `• **Telegram:** ${botStatus}\n\n`;
       
-      if (!wsConnected && resilientProvider) {
-        message += `⚠️ **WebSocket reconnection attempts:** ${resilientProvider.reconnectAttempts}/${resilientProvider.maxReconnectAttempts}\n\n`;
+      if (!wsConnected && web3Service) {
+        message += `⚠️ **WebSocket reconnection attempts:** ${web3Service.reconnectAttempts}/${web3Service.maxReconnectAttempts}\n\n`;
       }
       
       message += `All systems operational! 🚀`;
@@ -2289,6 +1048,23 @@ Questions? The menu system makes everything easier! 🚀
         parse_mode: 'Markdown',
         reply_markup: createConfirmKeyboard('clearall_confirmed')
       });
+    }
+
+    else if (data === 'prompt_deposit_threshold') {
+      // Check if this is a group chat and user is not admin
+      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+        return;
+      }
+
+      // Set the user's state to indicate we are waiting for their threshold input
+      userStates.set(chatId, 'awaiting_deposit_threshold');
+    
+      // Ask the user for the new threshold
+      bot.sendMessage(chatId, 'Please enter the new deposit alert threshold (e.g., 0.5 for 0.5%).\n\nThis threshold is used to notify you 4 hourly about your tracked deposits that are LESS than the market rate by your given percentage. (default value 0.25%)');
+      
+      // Acknowledge the button click
+      bot.answerCallbackQuery(callbackQuery.id);
     }
 
     else if (data === 'confirm_clearall_confirmed') {
@@ -2369,6 +1145,73 @@ bot.on('message', async (msg) => {
         reply_markup: createDepositMenu()
       });
       
+      // Delete user's input message
+      try {
+        await bot.deleteMessage(chatId, msg.message_id);
+      } catch (e) {
+        // Ignore if can't delete
+      }
+    }
+
+    // Check if we are waiting for a deposit threshold from this user
+    else if (userStates.get(chatId) === 'awaiting_deposit_threshold') {
+      // We got the response, so clear the user's state
+      userStates.delete(chatId);
+      
+      const threshold = parseFloat(msg.text);
+      
+      if (isNaN(threshold)) {
+        bot.sendMessage(chatId, '❌ Invalid input. Please provide a non-negative number for the threshold.');
+        return;
+      }
+      
+      // Save the new threshold to the database
+      await db.setUserDepositThreshold(chatId, threshold);
+      
+      bot.sendMessage(chatId, `✅ Deposit alert threshold has been set to *${threshold}%*.`, { parse_mode: 'Markdown' });
+    }
+
+    else if (action === 'waiting_search_add') {
+      const newIds = text.split(/[,\s]+/).map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+      if (newIds.length === 0) {
+        bot.sendMessage(chatId, '❌ No valid deposit IDs provided. Please try again with numbers only.', {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🔙 Back to Menu', callback_data: 'menu_deposits' }
+            ]]
+          }
+        });
+        return;
+      }
+
+      // Update the original menu message to show searching
+      await bot.editMessageText('🔍 **Searching Deposits...**\n\nPlease wait while I search for the deposit information.', {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+
+      // Show typing indicator while processing
+      await bot.sendChatAction(chatId, 'typing');
+
+      for (const id of newIds) {
+        try {
+          const result = await searchDeposit(id);
+          const message = await formatTelegramMessage(result);
+          await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        } catch (error) {
+          console.error('Error searching deposit:', error);
+          await bot.sendMessage(chatId, `❌ Error searching deposit ${id}: ${error.message}`, { parse_mode: 'Markdown' });
+        }
+      }
+
+      // Show completed search message
+      await bot.sendMessage(chatId, '🔍 **Search Complete**\n\nAll deposit information has been retrieved.', {
+        parse_mode: 'Markdown',
+        reply_markup: createDepositMenu()
+      });
+
       // Delete user's input message
       try {
         await bot.deleteMessage(chatId, msg.message_id);
@@ -2618,7 +1461,7 @@ bot.onText(/^🔧 System$/, async (msg) => {
   const chatId = msg.chat.id;
   
   // Reuse the existing /status functionality
-  const wsConnected = resilientProvider?.isConnected || false;
+  const wsConnected = web3Service?.isConnected || false;
   const wsStatus = wsConnected ? '🟢 Connected' : '🔴 Disconnected';
   
   let dbStatus = '🔴 Disconnected';
@@ -2642,8 +1485,8 @@ bot.onText(/^🔧 System$/, async (msg) => {
   message += `• **Database:** ${dbStatus}\n`;
   message += `• **Telegram:** ${botStatus}\n\n`;
   
-  if (!wsConnected && resilientProvider) {
-    message += `⚠️ **WebSocket reconnection attempts:** ${resilientProvider.reconnectAttempts}/${resilientProvider.maxReconnectAttempts}\n\n`;
+  if (!wsConnected && web3Service) {
+    message += `⚠️ **WebSocket reconnection attempts:** ${web3Service.reconnectAttempts}/${web3Service.maxReconnectAttempts}\n\n`;
   }
   
   message += `All systems operational! 🚀`;
@@ -2764,41 +1607,6 @@ Ready to begin?
 });
 
 console.log('✅ Interactive menu system loaded successfully!');
-
-// // Handle /start command - show help
-// bot.onText(/\/start/, (msg) => {
-//   const chatId = msg.chat.id;
-//   const helpMessage = `
-// 🤖 *ZKP2P Tracker Commands:*
-
-// **Deposit Tracking:**
-// - \`/deposit all\` - Listen to ALL deposits (every event)
-// - \`/deposit stop\` - Stop listening to all deposits
-// - \`/deposit 123\` - Track a specific deposit
-// - \`/deposit 123,456,789\` - Track multiple deposits
-// - \`/remove 123\` - Stop tracking specific deposit(s)
-
-// **Sniper (Arbitrage Alerts):**
-// - \`/sniper eur\` - Snipe EUR on ALL platforms
-// - \`/sniper eur revolut\` - Snipe EUR only on Revolut
-// - \`/sniper usd zelle\` - Snipe USD only on Zelle
-// - \`/sniper threshold 0.5\` - Set your alert threshold to 0.5%
-// - \`/sniper list\` - Show active sniper settings
-// - \`/sniper clear\` - Clear all sniper settings
-// - \`/unsnipe eur\` - Stop sniping EUR (all platforms)
-// - \`/unsnipe eur wise\` - Stop sniping EUR on Wise only
-
-// **General:**
-// - \`/list\` - Show all tracking status (deposits + snipers)
-// - \`/clearall\` - Stop all tracking and clear everything
-// - \`/status\` - Check WebSocket connection and settings
-// - \`/help\` - Show this help message
-
-// *Note: Each user has their own settings. Sniper alerts you when deposits offer better exchange rates than market!*
-// `.trim();
-  
-//   bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
-// });
 
 
 bot.onText(/\/help/, (msg) => {
@@ -3110,40 +1918,33 @@ if (name === 'DepositReceived') {
   }
 };
 
-// Initialize the resilient WebSocket provider
-const resilientProvider = new ResilientWebSocketProvider(
-  process.env.BASE_RPC,
-  contractAddress,
-  handleContractEvent
-);
-
 // Add startup message
 console.log('🤖 ZKP2P Telegram Bot Started (Supabase Integration with Auto-Reconnect + Sniper)');
 console.log('🔍 Listening for contract events...');
-console.log(`📡 Contract: ${contractAddress}`);
+// console.log(`📡 Contract: ${contractAddress}`);
 
 // Improved graceful shutdown with proper cleanup
 const gracefulShutdown = async (signal) => {
   console.log(`🔄 Received ${signal}, shutting down gracefully...`);
-  
+
   try {
     // Stop accepting new connections
-    if (resilientProvider) {
-      await resilientProvider.destroy();
+    if (web3Service) {
+      await web3Service.destroy();
     }
-    
+
     // Stop the Telegram bot
     if (bot) {
       console.log('🛑 Stopping Telegram bot...');
       await bot.stopPolling();
     }
-    
+
     // Close database connections (if any)
     console.log('🛑 Cleaning up resources...');
-    
+
     console.log('✅ Graceful shutdown completed');
     process.exit(0);
-    
+
   } catch (error) {
     console.error('❌ Error during shutdown:', error);
     process.exit(1);
@@ -3154,25 +1955,25 @@ const gracefulShutdown = async (signal) => {
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught exception:', error);
   console.error('Stack trace:', error.stack);
-  
+
   // Attempt to restart WebSocket if it's a connection issue
   if (error.message.includes('WebSocket') || error.message.includes('ECONNRESET')) {
     console.log('🔄 Attempting to restart WebSocket due to connection error...');
-    if (resilientProvider) {
-      resilientProvider.restart();
+    if (web3Service) {
+      web3Service.restart();
     }
   }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled rejection at:', promise, 'reason:', reason);
-  
+
   // Attempt to restart WebSocket if it's a connection issue
-  if (reason && reason.message && 
+  if (reason && reason.message &&
       (reason.message.includes('WebSocket') || reason.message.includes('ECONNRESET'))) {
     console.log('🔄 Attempting to restart WebSocket due to rejection...');
-    if (resilientProvider) {
-      resilientProvider.restart();
+    if (web3Service) {
+      web3Service.restart();
     }
   }
 });
@@ -3181,10 +1982,38 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+// Telegram Bot Message Handlers
+bot.onText(/\/searchdeposit (\d+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const depositId = parseInt(match[1]);
+
+  try {
+    // Initialize user in database
+    await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
+
+    // Show typing indicator
+    await bot.sendChatAction(chatId, 'typing');
+
+    // Import search and formatting functions
+    const { searchDeposit, formatTelegramMessage } = require('./scripts/search-deposit.js');
+
+    // Search for deposit
+    const result = await searchDeposit(depositId);
+
+    // Format and send the message
+    const message = await formatTelegramMessage(result);
+    await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+
+  } catch (error) {
+    console.error('Error in search deposit command:', error);
+    await bot.sendMessage(chatId, `❌ Error searching deposit: ${error.message}`);
+  }
+});
+
 // Health check interval
 setInterval(async () => {
-  if (resilientProvider && !resilientProvider.isConnected) {
+  if (web3Service && !web3Service.isConnected) {
     console.log('🔍 Health check: WebSocket disconnected, attempting restart...');
-    await resilientProvider.restart();
+    await web3Service.restart();
   }
 }, 120000); // Check every two minutes

@@ -1,10 +1,11 @@
 {
   "name": "base-telegram-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "test": "jest",
+    "start": "node bot.js",
+    "test:deposit-monitor": "jest test/test-deposit-monitor.test.js"
   },
   "keywords": [],
   "author": "",
@@ -12,9 +13,15 @@
   "type": "commonjs",
   "description": "",
   "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
     "dotenv": "^16.5.0",
     "ethers": "^6.14.1",
+    "express": "^4.18.2",
+    "node-fetch": "^3.0.0",
     "node-telegram-bot-api": "^0.66.0",
-    "@supabase/supabase-js": "^2.39.0"
+    "web3": "^4.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
