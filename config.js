@@ -47,6 +47,7 @@ const platformNameMapping = {
   '0x1783f040783C0827fB64d128ECE548d9B3613Ad5': '🏦 Zelle',
   '0x03d17E9371C858072E171276979f6B44571C5DeA': '💰 PayPal',
   '0x0dE46433bD251027f73eD8f28E01eF05DA36a2E0': '🇬🇧 Monzo',
+  '0x431a078a5029146aab239c768a615cd484519af7': 'Zelle',
   // Additional mappings can be added here
 };
 

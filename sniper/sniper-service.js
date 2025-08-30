@@ -5,11 +5,10 @@ const { escrowContract } = require('../config');
 const {
   currencyHashToCode,
   EXPLORER_CONFIG,
-  getPlatformName
+  getPlatformName,
+  currencyNameMapping, 
+  platformNameMapping
 } = require('../config/web3-config');
-
-// Import currencyNameMapping and platformNameMapping for enhanced extraction
-const { currencyNameMapping, platformNameMapping } = require('../config');
 
 /**
  * Sniper Service Module
