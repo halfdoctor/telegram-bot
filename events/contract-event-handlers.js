@@ -84,6 +84,12 @@ async function handleDepositCurrencyAdded(parsed, log) {
   const currency = parsed.args[2];
   const conversionRate = BigInt(parsed.args[3]).toString();
 
+  // Validate parsed event arguments
+  if (!verifier || typeof verifier !== 'string') {
+    console.error(`❌ Invalid verifier in DepositCurrencyAdded event:`, verifier);
+    return;
+  }
+
   console.log(`📊 DepositCurrencyAdded: ID=${depositId}, Currency=${currency}, Verifier=${verifier}, Rate=${conversionRate}`);
 
   // ✅ RETRIEVE STORED DEPOSIT DATA FROM GLOBAL STATE FIRST
@@ -132,9 +138,11 @@ async function handleDepositCurrencyAdded(parsed, log) {
 
             // Cache in Web3State for future use
             try {
+              // Validate verifier before caching
+              const verifierLower = typeof verifier === 'string' ? verifier.toLowerCase() : '0x0000000000000000000000000000000000000000';
               Web3State.setDepositState(depositId.toString(), {
                 depositAmount: contractAmount,
-                verifierAddress: verifier.toLowerCase()
+                verifierAddress: verifierLower
               });
             } catch (cacheError) {
               console.error(`❌ Caching error:`, cacheError.message);
@@ -177,6 +185,12 @@ async function handleDepositConversionRateUpdated(parsed, log) {
   const verifier = parsed.args[1];
   const currency = parsed.args[2];
   const conversionRate = BigInt(parsed.args[3]).toString();
+
+  // Validate parsed event arguments
+  if (!verifier || typeof verifier !== 'string') {
+    console.error(`❌ Invalid verifier in DepositConversionRateUpdated event:`, verifier);
+    return;
+  }
 
   console.log(`📊 DepositConversionRateUpdated: ID=${depositId}, Rate=${conversionRate}, Currency=${currency}, Verifier=${verifier}`);
 
@@ -226,9 +240,11 @@ async function handleDepositConversionRateUpdated(parsed, log) {
 
             // Cache in Web3State for future use
             try {
+              // Validate verifier before caching
+              const verifierLower = typeof verifier === 'string' ? verifier.toLowerCase() : '0x0000000000000000000000000000000000000000';
               Web3State.setDepositState(depositId.toString(), {
                 depositAmount: contractAmount,
-                verifierAddress: verifier.toLowerCase()
+                verifierAddress: verifierLower
               });
             } catch (cacheError) {
               console.error(`❌ Caching error:`, cacheError.message);
@@ -267,6 +283,12 @@ async function handleDepositConversionRateUpdated(parsed, log) {
 
 async function handleDepositReceived(parsed, log) {
   const { depositId, depositor, verifier, amount } = parsed.args;
+
+  // Validate parsed event arguments
+  if (!verifier || typeof verifier !== 'string') {
+    console.error(`❌ Invalid verifier in DepositReceived event:`, verifier);
+    return;
+  }
 
   console.log(`💰 Deposit received: ${depositId} (${Utils.convertFromMicrounits(amount.toString())} USDC)`);
 

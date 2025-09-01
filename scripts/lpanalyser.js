@@ -5,17 +5,15 @@ class LPProfileAnalyzer {
     this.duneData = null;
   }
 
-  async fetchEvents(force = false) {
-    const result = await getDuneData(force);
+  async fetchEvents(force = false, depositor = null) {
+    const result = await getDuneData(force, depositor);
     this.duneData = result.result.rows;
   }
 
-  async generateLPProfile(depositorAddress) {
+  async generateLPProfile(depositorAddress, force = false) {
     console.log(`Generating LP profile for ${depositorAddress}...`);
 
-    if (!this.duneData) {
-      await this.fetchEvents();
-    }
+    await this.fetchEvents(force, depositorAddress);
 
     const profileData = this.duneData.find(
       row => row.depositor.toLowerCase() === depositorAddress.toLowerCase()
@@ -78,18 +76,19 @@ async function analyzeLiquidityProvider(depositorAddress, force = false) {
   try {
     console.log('Initializing LP analyzer...');
     const analyzer = await initializeLPAnalyzer();
-    
-    console.log('Fetching events from Dune...');
-    await analyzer.fetchEvents(force);
-    
+
     console.log('Generating LP profile...');
-    const profile = await analyzer.generateLPProfile(depositorAddress);
-    
+    const profile = await analyzer.generateLPProfile(depositorAddress, force);
+
+    if (profile.result && profile.result.rows && profile.result.rows.length > 0 && profile.result.rows[0].error) {
+      console.error(profile.result.rows[0].error);
+      return profile.result.rows[0].error;
+    }
     if (profile.error) {
       console.error(profile.error);
       return null;
     }
-    
+
     console.log('LP Profile:', JSON.stringify(profile, null, 2));
     return profile;
   } catch (error) {

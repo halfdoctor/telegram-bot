@@ -125,7 +125,7 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
   // Extract currency code from currencyNameMapping by parsing the display name
   let currencyCode = null;
   const currencyName = currencyNameMapping[currencyHash.toLowerCase()];
-  if (currencyName) {
+  if (currencyName && typeof currencyName === 'string') {
     // Extract currency code from format like "🇯🇵 ¥ JPY" -> "JPY"
     const currencyCodeMatch = currencyName.match(/\b([A-Z]{3})\b$/);
     currencyCode = currencyCodeMatch ? currencyCodeMatch[1] : null;
@@ -139,16 +139,24 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
   // Extract platform name from platformNameMapping, similar to currency extraction
   let platformName = 'unknown platform'; // Default fallback
   const platformDisplayName = platformNameMapping[verifierAddress];
-  if (platformDisplayName) {
+  if (platformDisplayName && typeof platformDisplayName === 'string') {
     // Extract platform name from format like "🌍 Wise" -> "wise"
     const platformNameMatch = platformDisplayName.match(/([^ ]+)$/);
-    platformName = platformNameMatch ? platformNameMatch[1].toLowerCase() : 'unknown platform';
+    platformName = platformNameMatch && platformNameMatch[1] ? platformNameMatch[1] : 'unknown platform';
   }
 
   // Fallback to getPlatformName if not found in platformNameMapping
   if (platformName === 'unknown platform') {
-    platformName = getPlatformName(verifierAddress).toLowerCase();
+    const platformFallback = getPlatformName(verifierAddress);
+    if (typeof platformFallback === 'string') {
+      platformName = platformFallback || 'unknown platform';
+    } else {
+      platformName = 'unknown platform';
+    }
   }
+
+  // Ensure platformName is lowercase string
+  // platformName = platformName ? platformName.replace(/[^a-z0-9]/gi, '') : 'unknown platform';
 
   if (!currencyCode) return; // Only skip unknown currencies
 
@@ -221,8 +229,8 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
         const message = `🎯 *SNIPER ALERT - ${currencyCode}*
 🏦 *Platform:* ${platformName}
 📊 New Deposit #${depositId}: ${formattedAmount} USDC
-💰 Deposit Rate: ${depositRate.toFixed(4)} ${currencyCode}/USD
-📈 Market Rate: ${marketRate.toFixed(4)} ${currencyCode}/USD
+💰 Deposit Rate: ${depositRate.toFixed(4)} USD/${currencyCode}
+📈 Market Rate: ${marketRate.toFixed(4)} USD/${currencyCode}
 🔥 ${percentageDiff.toFixed(1)}% BETTER than market!
 
 💵 *If you filled this entire order:*
@@ -231,6 +239,7 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
 - **You save: ${savings} ${currencyCode}**
 
 *You get ${currencyCode} at ${percentageDiff.toFixed(1)}% discount on ${platformName}!*`.trim();
+console.log(`📨 Message for ${chatId}:\n${message}`);
 
         // Log sniper alert with error handling
         try {

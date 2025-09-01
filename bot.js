@@ -770,16 +770,43 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     else if (data === 'prompt_deposit_remove') {
-      userStates.set(chatId, { action: 'waiting_deposit_remove', messageId });
-      await bot.editMessageText('➖ **Remove Tracking**\n\nPlease send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:', {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '❌ Cancel', callback_data: 'menu_deposits' }
-          ]]
+      userStates.set(chatId, { action: 'waiting_deposit_remove' });
+
+      const userDeposits = await db.getUserDeposits(chatId);
+      const userStatesInfo = await db.getUserDepositStates(chatId);
+      const listeningAll = await db.getUserListenAll(chatId);
+
+      let message = '➖ **Remove Tracking**\n\n';
+
+      if (listeningAll) {
+        message += '🌐 **Currently listening to ALL deposits**\n\n';
+      }
+
+      const idsArray = Array.from(userDeposits).sort((a, b) => a - b);
+      if (idsArray.length > 0) {
+        message += `📊 **Currently tracking ${idsArray.length} deposits:**\n`;
+        idsArray.slice(0, 10).forEach(id => { // Show max 10
+          const state = userStatesInfo.get(id);
+          const status = state ? state.status : 'tracking';
+          const emoji = status === 'fulfilled' ? '✅' :
+                        status === 'pruned' ? '🟡' : '👀';
+          message += `    ${emoji} \`${id}\` - ${status}\n`;
+        });
+
+        if (idsArray.length > 10) {
+          message += `\n... and ${idsArray.length - 10} more\n`;
         }
+        message += '\n\n';
+      }
+
+      if (idsArray.length === 0 && !listeningAll) {
+        message += '📊 **No deposits currently being tracked.**\n\n';
+      }
+
+      message += 'Please send the deposit ID(s) you want to stop tracking.\n\nExamples:\n• `123` - remove single deposit\n• `123,456,789` - remove multiple deposits\n\nSend your message now:';
+
+      await bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown'
       });
     }
 
@@ -888,7 +915,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     else if (data === 'prompt_lp_analysis') {
       userStates.set(chatId, { action: 'waiting_lp_address', messageId });
-      await bot.editMessageText('📈 *LP Analysis*\n\nPlease send the Ethereum address of the LP you want to analyze.', {
+      await bot.editMessageText('📈 *LP Analysis*\n\nPlease send the Ethereum address of the LP you want to analyze.\n\nWIP - Depends on author Dune credits available. :-)', {
         chat_id: chatId,
         message_id: messageId,
         parse_mode: 'Markdown',
@@ -1289,46 +1316,41 @@ bot.on('message', async (msg) => {
     }
     
     else if (action === 'waiting_deposit_remove') {
-      const idsToRemove = text.split(/[,\s]+/).map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-      
-      if (idsToRemove.length === 0) {
-        bot.sendMessage(chatId, '❌ No valid deposit IDs provided. Please try again with numbers only.', {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '🔙 Back to Menu', callback_data: 'menu_deposits' }
-            ]]
+          const idsToRemove = text.split(/[,\s]+/).map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+    
+          if (idsToRemove.length === 0) {
+            await bot.sendMessage(chatId, '❌ No valid deposit IDs provided. Please try again with numbers only.', {
+              reply_markup: {
+                inline_keyboard: [[
+                  { text: '🔙 Back to Menu', callback_data: 'menu_deposits' }
+                ]]
+              }
+            });
+            userStates.delete(chatId);
+            return;
           }
-        });
-        return;
-      }
-      
-      for (const id of idsToRemove) {
-        await db.removeUserDeposit(chatId, id);
-      }
-      
-      const userDeposits = await db.getUserDeposits(chatId);
-      const remainingIds = Array.from(userDeposits).sort((a, b) => a - b);
-      
-      let message = '✅ **Successfully Removed!**\n\n';
-      if (remainingIds.length > 0) {
-        message += `Still tracking: \`${remainingIds.join(', ')}\``;
-      } else {
-        message += `No deposits currently being tracked.`;
-      }
-      
-      await bot.editMessageText(message, {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown',
-        reply_markup: createDepositMenu()
-      });
-      
-      try {
-        await bot.deleteMessage(chatId, msg.message_id);
-      } catch (e) {
-        // Ignore if can't delete
-      }
-    }
+    
+          for (const id of idsToRemove) {
+            await db.removeUserDeposit(chatId, id);
+          }
+    
+          const userDeposits = await db.getUserDeposits(chatId);
+          const remainingIds = Array.from(userDeposits).sort((a, b) => a - b);
+    
+          let message = '✅ **Successfully Removed!**\n\n';
+          if (remainingIds.length > 0) {
+            message += `Still tracking: \`${remainingIds.join(', ')}\``;
+          } else {
+            message += `No deposits currently being tracked.`;
+          }
+    
+          await bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: createDepositMenu()
+          });
+    
+          userStates.delete(chatId);
+        }
     
     else if (action === 'waiting_threshold') {
       const threshold = parseFloat(text.trim());
