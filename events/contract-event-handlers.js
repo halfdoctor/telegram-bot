@@ -59,9 +59,26 @@ const handleContractEvent = async (log) => {
         await handleIntentFulfilled(parsed, log);
         break;
 
-      case 'IntentPruned':
-        await handleIntentPruned(parsed, log);
+      case 'IntentPruned': {
+        const { intentHash } = parsed.args;
+        const intentHashLower = intentHash.toLowerCase();
+        const txHash = log.transactionHash.toLowerCase();
+
+        // Check if intent is already fulfilled (prioritize fulfilled over pruned)
+        let isAlreadyFulfilled = false;
+        for (const [hash, txData] of Web3State.getPendingTransactions()) {
+          if (txData.fulfilled && txData.fulfilled.has(intentHashLower)) {
+            isAlreadyFulfilled = true;
+            console.log(`⚠️ Intent ${intentHashLower} is already fulfilled, skipping pruned processing`);
+            break;
+          }
+        }
+
+        if (!isAlreadyFulfilled) {
+          await handleIntentPruned(parsed, log);
+        }
         break;
+      }
 
       case 'DepositReceived':
         await handleDepositReceived(parsed, log);
