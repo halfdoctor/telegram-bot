@@ -2,7 +2,7 @@ const { ethers } = require('ethers');
 const DatabaseManager = require('../scripts/database-manager.js');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
 const { Web3State, depositState } = require('../models/web3-state');
-const { sendSignaledNotification } = require('../notifications/telegram-notifications');
+const { sendSignaledNotification, sendPrunedNotification } = require('../notifications/telegram-notifications');
 const { scheduleTransactionProcessing } = require('../transactions/transaction-manager');
 const { checkSniperOpportunity } = require('../sniper/sniper-service');
 const {
@@ -13,6 +13,22 @@ const {
 } = require('../config/web3-config');
 // Import provider and contract from config module
 const { escrowContract } = require('../config.js');
+// Utility function for retry with exponential backoff
+async function retryWithBackoff(fn, maxRetries = 5, initialDelay = 1000) {
+  let delay = initialDelay;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === maxRetries) throw error;
+      console.log(`Attempt ${attempt} failed, retrying in ${delay}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 1.5;
+    }
+  }
+}
+// Module-level storage for intent data (reset on restart)
+const storedIntents = new Map();
 
 
 // Main event handler for contract events
@@ -364,6 +380,8 @@ async function handleIntentSignaled(parsed, log) {
   // Send immediate notification for signaled intent
   const notificationTxHash = log.transactionHash;
   await sendSignaledNotification(rawIntent, notificationTxHash);
+  // Store intent data for potential pruned events
+  storedIntents.set(intentHash.toLowerCase(), rawIntent);
 }
 
 async function handleIntentFulfilled(parsed, log) {
@@ -467,12 +485,26 @@ async function handleIntentPruned(parsed, log) {
   console.log(`   - Transaction Hash: ${log.transactionHash}`);
 
   const txHash = log.transactionHash.toLowerCase();
+  const notificationTxHash = log.transactionHash;
+
+  // Try to get stored intent data from previous signaled event (module-level Map first, then Web3State)
+  let storedRawIntent = null;
+  const intentHashLower = intentHash.toLowerCase();
+  storedRawIntent = storedIntents.get(intentHashLower);
+  if (!storedRawIntent) {
+    for (const [hash, txData] of Web3State.getPendingTransactions()) {
+      if (txData.rawIntents.has(intentHashLower)) {
+        storedRawIntent = txData.rawIntents.get(intentHashLower);
+        break;
+      }
+    }
+  }
 
   try {
     // Import globally available escrowContract - should be set up by main application
 
     // Fetch the full intent data from the contract since IntentPruned event only has intentHash and depositId
-    const intentData = await escrowContract.getIntent(intentHash);
+    const intentData = await retryWithBackoff(() => escrowContract.getIntent(intentHash), 5, 1000);
 
     console.log(`📊 Retrieved intent data for pruned intent ${intentHash}:`, {
       owner: intentData.intent.owner,
@@ -483,17 +515,29 @@ async function handleIntentPruned(parsed, log) {
       conversionRate: intentData.intent.conversionRate.toString()
     });
 
-    const rawIntent = {
+    // Use stored data if contract returns zeros
+    const useData = intentData.intent.amount !== 0 ? intentData.intent : (storedRawIntent ? {
+      owner: storedRawIntent.owner,
+      to: storedRawIntent.to,
+      amount: storedRawIntent.amount,
+      paymentVerifier: storedRawIntent.verifier,
+      fiatCurrency: storedRawIntent.fiatCurrency,
+      conversionRate: storedRawIntent.conversionRate
+    } : intentData.intent);
+
+    let rawIntent = {
       eventType: 'IntentPruned',
       intentHash: intentHash.toLowerCase(),
       depositId: Number(depositId),
-      owner: intentData.intent.owner,
-      to: intentData.intent.to,
-      amount: intentData.intent.amount.toString(),
-      verifier: intentData.intent.paymentVerifier,
-      fiatCurrency: intentData.intent.fiatCurrency,
-      conversionRate: intentData.intent.conversionRate.toString()
+      owner: useData.owner,
+      to: useData.to,
+      amount: useData.amount.toString(),
+      verifier: useData.paymentVerifier,
+      fiatCurrency: useData.fiatCurrency,
+      conversionRate: useData.conversionRate.toString()
     };
+
+    await sendPrunedNotification(rawIntent, notificationTxHash);
 
     // Get existing transaction state or create new
     let txData = Web3State.getTransactionState(txHash);

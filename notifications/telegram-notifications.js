@@ -61,15 +61,14 @@ async function sendPrunedNotification(rawIntent, txHash) {
       return;
     }
 
-    const platformName = Utils.resolvePlatformName(rawIntent.paymentVerifier, rawIntent.owner, rawIntent.to);
-    const { currencyCode, currencyName } = Utils.getCurrencyInfo(rawIntent.fiatCurrency);
+    const platformName = Utils.resolvePlatformName(rawIntent.verifier, rawIntent.owner, rawIntent.to);
 
     // Format message for pruned intents
     const message = `🟠 *Intent Pruned*
 
 ❌ **Intent has been cancelled**
-💵 **Platform:** ${platformName}
 🔢 **Deposit ID:** ${rawIntent.depositId}
+📭 *Intent Hash:* ${rawIntent.intentHash}
 🔗 **Transaction:** ${Utils.formatTxHash(txHash)}
 
 *The intent was pruned and no longer active.*`;
@@ -133,7 +132,7 @@ async function sendNotification(rawIntent, txHash, status, options) {
 
 🎯 **Deposit ID:** ${rawIntent.depositId}
 💰 **Amount:** ${usdcAmount.toFixed(2)} USDC
-**Fiat Amount:** ${Utils.formatFiatAmount(fiatAmount.toLocaleString(), currencyName)} (${formatConversionRate(conversionRate.toString(), currencyCode)} ${currencyName} / USDC)
+💵 **Fiat Amount:** ${Utils.formatFiatAmount(fiatAmount.toLocaleString(), currencyName)} (${formatConversionRate(conversionRate.toString(), currencyCode)} USDC / ${currencyName})
 🏦 **Platform:** ${platformName}`;
 
     // Add owner field for signaled notifications
@@ -142,6 +141,7 @@ async function sendNotification(rawIntent, txHash, status, options) {
     }
 
     message += `\n👤 **Recipient:** ${rawIntent.to}
+📭 *IntentHash:* ${rawIntent.intentHash}
 🔗 **Transaction:** ${Utils.formatTxHash(txHash)}`;
 
     // Add timestamp for signaled notifications
