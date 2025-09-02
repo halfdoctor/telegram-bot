@@ -6,8 +6,9 @@ const {
   currencyHashToCode,
   EXPLORER_CONFIG,
   getPlatformName,
-  currencyNameMapping, 
-  platformNameMapping
+  currencyNameMapping,
+  platformNameMapping,
+  normalizedPlatformMapping
 } = require('../config/web3-config');
 
 /**
@@ -136,9 +137,9 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
     currencyCode = currencyHashToCode[currencyHash.toLowerCase()];
   }
 
-  // Extract platform name from platformNameMapping, similar to currency extraction
+  // Extract platform name from normalizedPlatformMapping, similar to currency extraction
   let platformName = 'unknown platform'; // Default fallback
-  const platformDisplayName = platformNameMapping[verifierAddress];
+  const platformDisplayName = normalizedPlatformMapping[verifierAddress.toLowerCase()];
   if (platformDisplayName && typeof platformDisplayName === 'string') {
     // Extract platform name from format like "🌍 Wise" -> "wise"
     const platformNameMatch = platformDisplayName.match(/([^ ]+)$/);
