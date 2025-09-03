@@ -11,6 +11,10 @@ const depositState = new Map();
 // txHash -> {fulfilled: Set, pruned: Set, blockNumber: number, rawIntents: Map}
 const pendingTransactions = new Map();
 
+// Notification suppression state for preventing duplicate notifications
+// intentHash -> timestamp (when suppression was set)
+const notificationSuppression = new Map();
+
 class Web3State {
   /**
    * Deposit State Management
@@ -150,10 +154,46 @@ class Web3State {
       totalPruned
     };
   }
+
+  /**
+   * Notification Suppression Management
+   */
+  static suppressPrunedNotification(intentHash) {
+    const key = intentHash.toLowerCase();
+    const timestamp = Date.now();
+    notificationSuppression.set(key, timestamp);
+    console.log(`🔇 Suppressed pruned notification for intent ${key}`);
+  }
+
+  static isPrunedNotificationSuppressed(intentHash) {
+    const key = intentHash.toLowerCase();
+    const suppressed = notificationSuppression.has(key);
+    if (suppressed) {
+      console.log(`⚠️ Pruned notification already suppressed for intent ${key}`);
+    }
+    return suppressed;
+  }
+
+  static clearNotificationSuppression(intentHash) {
+    const key = intentHash.toLowerCase();
+    notificationSuppression.delete(key);
+  }
+
+  static cleanupNotificationSuppression(maxAgeSeconds = 300) { // Default 5 minutes
+    const now = Date.now();
+    const maxAge = maxAgeSeconds * 1000;
+
+    for (const [key, timestamp] of notificationSuppression.entries()) {
+      if (now - timestamp > maxAge) {
+        notificationSuppression.delete(key);
+      }
+    }
+  }
 }
 
 module.exports = {
   depositState,
   pendingTransactions,
+  notificationSuppression,
   Web3State
 };

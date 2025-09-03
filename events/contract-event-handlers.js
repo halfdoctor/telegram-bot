@@ -30,6 +30,37 @@ async function retryWithBackoff(fn, maxRetries = 5, initialDelay = 1000) {
 // Module-level storage for intent data (reset on restart)
 const storedIntents = new Map();
 
+// Delayed notification queue to handle race conditions between Pruned and Fulfilled events
+const delayedPrunedNotifications = new Map();
+const processedIntentHashes = new Map();
+
+// Process delayed pruned notification with timeout to allow fulfilled events to be processed first
+async function processDelayedPrunedNotification(eventKey, delayMs = 3000) {
+  setTimeout(async () => {
+    try {
+      // Check if notification was already cancelled/suppressed
+      if (!delayedPrunedNotifications.has(eventKey)) {
+        return; // Already processed/cancelled
+      }
+
+      const notificationData = delayedPrunedNotifications.get(eventKey);
+      delayedPrunedNotifications.delete(eventKey);
+
+      // Double-check suppression before sending
+      if (Web3State.isPrunedNotificationSuppressed(notificationData.intentHash)) {
+        console.log(`🚫 Skipping delayed pruned notification for ${notificationData.intentHash} - fulfilled`);
+        return;
+      }
+
+      console.log(`📤 Sending delayed pruned notification for ${notificationData.intentHash}`);
+      await sendPrunedNotification(notificationData.intentData, notificationData.txHash);
+
+    } catch (error) {
+      console.error(`❌ Error in delayed pruned notification:`, error);
+    }
+  }, delayMs);
+}
+
 
 // Main event handler for contract events
 const handleContractEvent = async (log) => {
@@ -61,22 +92,14 @@ const handleContractEvent = async (log) => {
 
       case 'IntentPruned': {
         const { intentHash } = parsed.args;
-        const intentHashLower = intentHash.toLowerCase();
-        const txHash = log.transactionHash.toLowerCase();
 
-        // Check if intent is already fulfilled (prioritize fulfilled over pruned)
-        let isAlreadyFulfilled = false;
-        for (const [hash, txData] of Web3State.getPendingTransactions()) {
-          if (txData.fulfilled && txData.fulfilled.has(intentHashLower)) {
-            isAlreadyFulfilled = true;
-            console.log(`⚠️ Intent ${intentHashLower} is already fulfilled, skipping pruned processing`);
-            break;
-          }
+        // Check if intent has already been fulfilled (notification suppression)
+        if (Web3State.isPrunedNotificationSuppressed(intentHash)) {
+          console.log(`⚠️ Intent ${intentHash} is already fulfilled, skipping pruned notification`);
+          break;
         }
 
-        if (!isAlreadyFulfilled) {
-          await handleIntentPruned(parsed, log);
-        }
+        await handleIntentPruned(parsed, log);
         break;
       }
 
@@ -426,6 +449,9 @@ async function handleIntentFulfilled(parsed, log) {
   const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
   await sendFulfilledNotification(intentForNotification, notificationTxHash);
 
+  // ✅ SUPPRESS PRUNED NOTIFICATIONS for this fulfilled intent
+  Web3State.suppressPrunedNotification(intentHash);
+
   try {
     // Fetch complete intent data from contract to get conversionRate and fiatCurrency
     const escrowContract = new ethers.Contract(CONTRACT_ADDRESS, require('../config/web3-config').contractABI, global.provider || require('./scripts/web3-service.js'));
@@ -503,10 +529,19 @@ async function handleIntentPruned(parsed, log) {
 
   const txHash = log.transactionHash.toLowerCase();
   const notificationTxHash = log.transactionHash;
+  const intentHashLower = intentHash.toLowerCase();
+
+  // ✅ DELAY PRUNED NOTIFICATION TO ALLOW FULFILLED TO BE PROCESSED FIRST
+  const eventKey = `${txHash}-${intentHashLower}`;
+
+  const notificationData = {
+    intentHash: intentHashLower,
+    txHash: notificationTxHash,
+    intentData: null // Will be populated from stored intent data
+  };
 
   // Try to get stored intent data from previous signaled event (module-level Map first, then Web3State)
   let storedRawIntent = null;
-  const intentHashLower = intentHash.toLowerCase();
   storedRawIntent = storedIntents.get(intentHashLower);
   if (!storedRawIntent) {
     for (const [hash, txData] of Web3State.getPendingTransactions()) {
@@ -515,6 +550,36 @@ async function handleIntentPruned(parsed, log) {
         break;
       }
     }
+  }
+
+  // Use the stored intent data for notification
+  if (storedRawIntent) {
+    notificationData.intentData = {
+      eventType: 'IntentPruned',
+      intentHash: intentHashLower,
+      depositId: storedRawIntent.depositId,
+      paymentVerifier: storedRawIntent.verifier,
+      owner: storedRawIntent.owner,
+      to: storedRawIntent.to,
+      amount: storedRawIntent.amount,
+      fiatCurrency: storedRawIntent.editorial,
+      conversionRate: storedRawIntent.conversionRate,
+      timestamp: Math.floor(Date.now() / 1000)
+    };
+  } else {
+    // Fallback notification data if no stored intent
+    notificationData.intentData = {
+      eventType: 'IntentPruned',
+      intentHash: intentHashLower,
+      depositId: Number(depositId),
+      paymentVerifier: 'unknown',
+      owner: 'unknown',
+      to: 'unknown',
+      amount: '0',
+      fiatCurrency: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      conversionRate: '0',
+      timestamp: Math.floor(Date.now() / 1000)
+    };
   }
 
   try {
