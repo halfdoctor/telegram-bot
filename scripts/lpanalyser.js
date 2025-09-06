@@ -122,11 +122,26 @@ function formatLPProfileForTelegram(profile) {
 - *Last Trade Date:* ${profile.latest_profit_date ? new Date(profile.latest_profit_date).toDateString() : 'N/A'}
   `;
 
-  const platforms = `
+  const platformDisplayNames = {
+    cashapp: 'CashApp',
+    monzo: 'Monzo',
+    paypal: 'PayPal',
+    revolut: 'Revolut',
+    venmo: 'Venmo',
+    wise: 'Wise',
+    mercadopago: 'MercadoPago',
+    zelle: 'Zelle'
+  };
+
+  const platformNames = Object.keys(platformDisplayNames);
+  const activePlatforms = platformNames.filter(platform => profile[`${platform}_trades`] > 0);
+
+  const platforms = activePlatforms.length > 0 ? `
 *Platforms*
-- *Revolut:* ${profile.revolut_trades} trades, $${profile.revolut_profit.toFixed(2)} profit
-- *Wise:* ${profile.wise_trades} trades, $${profile.wise_profit.toFixed(2)} profit
-- *PayPal:* ${profile.paypal_trades} trades, $${profile.paypal_profit.toFixed(2)} profit
+${activePlatforms.map(platform => `- *${platformDisplayNames[platform]}:* ${profile[`${platform}_trades`]} trades, $${profile[`${platform}_profit`].toFixed(2)} profit`).join('\n')}
+  ` : `
+*Platforms*
+No platform trades found.
   `;
 
   return `${header}\n${vault}${performance}${platforms}\n`;

@@ -3,14 +3,16 @@ const fs = require('fs').promises;
 const path = require('path');
 
 const DUNE_API_KEY = process.env.DUNE_API_KEY;
-const QUERY_ID = 5026187;
+const QUERY_ID = 5738104;
 const CACHE_FILE = path.join(__dirname, '..', 'cache', 'dune_cache.json');
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * Fetches the latest results from a Dune query, using a local cache to avoid redundant API calls.
+ * NOTE: The Dune query should be configured to return data for ALL depositors, not just one hardcoded address.
+ * The client will then filter for the specific depositor and cache results for 24 hours.
  * @param {boolean} force - Force fresh fetch by ignoring cache
- * @param {string} depositor - Depositor address to filter (optional, if provided, will execute new query)
+ * @param {string} depositor - Depositor address to filter (optional)
  * @returns {Promise<object>} The query results.
  */
 async function getDuneData(force = false, depositor = null) {
@@ -26,13 +28,26 @@ async function getDuneData(force = false, depositor = null) {
             const cached = JSON.parse(cachedData);
 
             // If depositor is specified, check if cache contains data for this depositor
+            // Note: Cache should contain ALL depositors if the Dune query is properly configured
             if (depositor) {
-                const hasDepositor = cached.result.rows.some(
-                    row => row.depositor.toLowerCase() === depositor.toLowerCase()
+                const cachedDepositor = cached.result.rows.find(
+                    row => row.depositor && row.depositor.toLowerCase() === depositor.toLowerCase()
                 );
-                if (hasDepositor) {
+                if (cachedDepositor) {
                     console.log(`Using cached data for depositor: ${depositor}`);
-                    return cached;
+                    // Return filtered result with only this depositor's data
+                    const filteredResult = {
+                        ...cached,
+                        result: {
+                            ...cached.result,
+                            rows: [cachedDepositor],
+                            metadata: {
+                                ...cached.result.metadata,
+                                row_count: 1
+                            }
+                        }
+                    };
+                    return filteredResult;
                 } else {
                     console.log(`Cache does not contain data for depositor: ${depositor}, fetching fresh data`);
                 }
@@ -49,83 +64,9 @@ async function getDuneData(force = false, depositor = null) {
         }
     }
 
-    if (depositor) {
-        console.log(`Fetching fresh data from Dune API for depositor: ${depositor}`);
-        const dune = new DuneClient(DUNE_API_KEY);
-        try {
-        const execution = await dune.runQuery({
-            queryId: QUERY_ID,
-            query_parameters: { depositor: depositor.toLowerCase() }
-        });
-
-        // Wait for execution to complete
-        await execution.waitForExecutionToComplete();
-
-        const result = await execution.getLatestResult();
-        const resultData = result.result;
-
-        await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-        await fs.writeFile(CACHE_FILE, JSON.stringify(resultData, null, 2), 'utf8');
-
-        console.log("Dune API Response:", JSON.stringify(resultData, null, 2));
-
-        return resultData;
-        } catch (error) {
-            console.log("Parameterized query failed, falling back to general query without parameters:", error.message);
-            // Check if it's a rate limit error
-            if (error.status === 429 || error.message.includes('Too many requests')) {
-                console.log("Rate limit exceeded for Dune API. Consider upgrading plan or waiting.");
-                // Return cached data if available, or empty result
-                try {
-                    const cachedData = await fs.readFile(CACHE_FILE, 'utf8');
-                    const cached = JSON.parse(cachedData);
-                    console.log("Returning available cached data due to rate limit.");
-                    return cached;
-                } catch (cacheError) {
-                    console.log("No cached data available, returning empty result.");
-                    return { result: { rows: [{ error: 'Too many requests to Dune API. Please upgrade plan or try again later.' }] } };
-                }
-            }
-
-            // Fall back to general query without parameters to get all data
-            const execution = await dune.runQuery({ queryId: QUERY_ID });
-            await execution.waitForExecutionToComplete();
-            const result = await execution.getLatestResult();
-
-            // Filter the result for the specific depositor
-            if (result.result && result.result.rows) {
-                const filteredRows = result.result.rows.filter(row =>
-                    row.depositor && row.depositor.toLowerCase() === depositor.toLowerCase()
-                );
-                const filteredResult = { ...result, result: { ...result.result, rows: filteredRows } };
-
-                await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-                await fs.writeFile(CACHE_FILE, JSON.stringify(filteredResult, null, 2), 'utf8');
-
-                console.log("Filtered Dune API Response:", JSON.stringify(filteredResult, null, 2));
-
-                return filteredResult;
-            } else {
-                const emptyResult = { ...result, result: { ...result.result, rows: [] } };
-                await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-                await fs.writeFile(CACHE_FILE, JSON.stringify(emptyResult, null, 2), 'utf8');
-
-                console.log("No data found in fallback query");
-                return emptyResult;
-            }
-        }
-    } else {
-        console.log("Fetching fresh data from Dune API...");
-        const dune = new DuneClient(DUNE_API_KEY);
-        const result = await dune.getLatestResult({ queryId: QUERY_ID });
-
-        await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-        await fs.writeFile(CACHE_FILE, JSON.stringify(result, null, 2), 'utf8');
-
-        console.log("Dune API Response:", JSON.stringify(result, null, 2));
-
-        return result;
-    }
+    console.log(`Fetching fresh data from Dune API${depositor ? ` for depositor: ${depositor}` : ''}...`);
+    const dune = new DuneClient(DUNE_API_KEY);
+    const result = await dune.getLatestResult({ queryId: QUERY_ID });
 
     await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
     await fs.writeFile(CACHE_FILE, JSON.stringify(result, null, 2), 'utf8');
