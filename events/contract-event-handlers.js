@@ -2,7 +2,7 @@ const { ethers } = require('ethers');
 const DatabaseManager = require('../scripts/database-manager.js');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
 const { Web3State, depositState } = require('../models/web3-state');
-const { sendSignaledNotification, sendPrunedNotification } = require('../notifications/telegram-notifications');
+const { sendSignaledNotification } = require('../notifications/telegram-notifications');
 const { scheduleTransactionProcessing } = require('../transactions/transaction-manager');
 const { checkSniperOpportunity } = require('../sniper/sniper-service');
 const {
@@ -30,36 +30,6 @@ async function retryWithBackoff(fn, maxRetries = 5, initialDelay = 1000) {
 // Module-level storage for intent data (reset on restart)
 const storedIntents = new Map();
 
-// Delayed notification queue to handle race conditions between Pruned and Fulfilled events
-const delayedPrunedNotifications = new Map();
-const processedIntentHashes = new Map();
-
-// Process delayed pruned notification with timeout to allow fulfilled events to be processed first
-async function processDelayedPrunedNotification(eventKey, delayMs = 3000) {
-  setTimeout(async () => {
-    try {
-      // Check if notification was already cancelled/suppressed
-      if (!delayedPrunedNotifications.has(eventKey)) {
-        return; // Already processed/cancelled
-      }
-
-      const notificationData = delayedPrunedNotifications.get(eventKey);
-      delayedPrunedNotifications.delete(eventKey);
-
-      // Double-check suppression before sending
-      if (Web3State.isPrunedNotificationSuppressed(notificationData.intentHash)) {
-        console.log(`🚫 Skipping delayed pruned notification for ${notificationData.intentHash} - fulfilled`);
-        return;
-      }
-
-      console.log(`📤 Sending delayed pruned notification for ${notificationData.intentHash}`);
-      await sendPrunedNotification(notificationData.intentData, notificationData.txHash);
-
-    } catch (error) {
-      console.error(`❌ Error in delayed pruned notification:`, error);
-    }
-  }, delayMs);
-}
 
 
 // Main event handler for contract events
@@ -92,13 +62,6 @@ const handleContractEvent = async (log) => {
 
       case 'IntentPruned': {
         const { intentHash } = parsed.args;
-
-        // Check if intent has already been fulfilled (notification suppression)
-        if (Web3State.isPrunedNotificationSuppressed(intentHash)) {
-          console.log(`⚠️ Intent ${intentHash} is already fulfilled, skipping pruned notification`);
-          break;
-        }
-
         await handleIntentPruned(parsed, log);
         break;
       }
@@ -444,13 +407,6 @@ async function handleIntentFulfilled(parsed, log) {
     timestamp: Math.floor(Date.now() / 1000)
   };
 
-  // Send immediate notification using event data
-  const notificationTxHash = log.transactionHash.toLowerCase();
-  const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
-  await sendFulfilledNotification(intentForNotification, notificationTxHash);
-
-  // ✅ SUPPRESS PRUNED NOTIFICATIONS for this fulfilled intent
-  Web3State.suppressPrunedNotification(intentHash);
 
   try {
     // Fetch complete intent data from contract to get conversionRate and fiatCurrency
@@ -618,8 +574,6 @@ async function handleIntentPruned(parsed, log) {
       fiatCurrency: useData.fiatCurrency,
       conversionRate: useData.conversionRate.toString()
     };
-
-    await sendPrunedNotification(rawIntent, notificationTxHash);
 
     // Get existing transaction state or create new
     let txData = Web3State.getTransactionState(txHash);
