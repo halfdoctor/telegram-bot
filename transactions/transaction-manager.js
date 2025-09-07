@@ -70,8 +70,13 @@ async function sendTransactionNotifications(txHash) {
 
   console.log(`📢 Processing notifications for ${txData.fulfilled?.size || 0} fulfilled and ${txData.pruned?.size || 0} pruned intents`);
 
-  // Process fulfilled intents
-  for (const [intentHash, rawIntent] of Web3State.getAllIntentsForTransaction(txHash)) {
+  // Get all unique intent hashes from both fulfilled and pruned sets
+  const allIntentHashes = new Set([...(txData.fulfilled || new Set()), ...(txData.pruned || new Set())]);
+
+  for (const intentHash of allIntentHashes) {
+    const rawIntent = txData.rawIntents?.get(intentHash);
+    if (!rawIntent) continue;
+
     console.log(`🔍 Processing intent ${intentHash} with status: ${
       txData.fulfilled?.has(intentHash) ? 'FULFILLED' :
       txData.pruned?.has(intentHash) ? 'PRUNED' : 'UNKNOWN'
@@ -84,7 +89,6 @@ async function sendTransactionNotifications(txHash) {
       console.log(`🟠 Sending pruned notification for ${intentHash}`);
       await sendPrunedNotification(rawIntent, txHash);
     }
-    // Note: signaled intents would be processed by the event handlers directly
   }
 
   console.log(`✅ All notifications sent for transaction ${txHash}`);

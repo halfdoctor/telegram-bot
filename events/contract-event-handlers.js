@@ -431,14 +431,20 @@ async function handleIntentFulfilled(parsed, log) {
     // Get transaction hash
     const txHash = log.transactionHash.toLowerCase();
 
-    // Add to pending transactions for processing
-    Web3State.setTransactionState(txHash, {
-      txHash,
-      fulfilled: new Set([intentHash.toLowerCase()]),
-      pruned: new Set(),
-      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
-      processed: false
-    });
+    // Add to pending transactions for processing - accumulate if exists
+    let txData = Web3State.getTransactionState(txHash);
+    if (!txData) {
+      txData = {
+        txHash,
+        fulfilled: new Set(),
+        pruned: new Set(),
+        rawIntents: new Map(),
+        processed: false
+      };
+    }
+    txData.fulfilled.add(intentHash.toLowerCase());
+    txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
+    Web3State.setTransactionState(txHash, txData);
 
     // Schedule processing
     scheduleTransactionProcessing(txHash);
@@ -461,13 +467,20 @@ async function handleIntentFulfilled(parsed, log) {
 
     const txHash = log.transactionHash.toLowerCase();
 
-    Web3State.setTransactionState(txHash, {
-      txHash,
-      fulfilled: new Set([intentHash.toLowerCase()]),
-      pruned: new Set(),
-      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
-      processed: false
-    });
+    // Add to pending transactions for processing - accumulate if exists
+    let txData = Web3State.getTransactionState(txHash);
+    if (!txData) {
+      txData = {
+        txHash,
+        fulfilled: new Set(),
+        pruned: new Set(),
+        rawIntents: new Map(),
+        processed: false
+      };
+    }
+    txData.fulfilled.add(intentHash.toLowerCase());
+    txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
+    Web3State.setTransactionState(txHash, txData);
 
     scheduleTransactionProcessing(txHash);
 
