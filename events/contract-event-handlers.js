@@ -2,7 +2,7 @@ const { ethers } = require('ethers');
 const DatabaseManager = require('../scripts/database-manager.js');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
 const { Web3State, depositState } = require('../models/web3-state');
-const { sendSignaledNotification } = require('../notifications/telegram-notifications');
+const { sendSignaledNotification, sendPrunedNotification } = require('../notifications/telegram-notifications');
 const { scheduleTransactionProcessing } = require('../transactions/transaction-manager');
 const { checkSniperOpportunity } = require('../sniper/sniper-service');
 const {
@@ -489,15 +489,66 @@ async function handleIntentFulfilled(parsed, log) {
 }
 
 async function handleIntentPruned(parsed, log) {
-  const { intentHash, depositId } = parsed.args;
+  const { intentHash } = parsed.args;
+  const depositId = parsed.args.depositId || 0;
 
   console.log(`🚨 INTENT_PRUNED EVENT RECEIVED:`);
-  console.log(`   - Deposit ID: ${depositId}`);
   console.log(`   - Intent Hash: ${intentHash}`);
   console.log(`   - Transaction Hash: ${log.transactionHash}`);
 
   const txHash = log.transactionHash.toLowerCase();
   const notificationTxHash = log.transactionHash;
+
+  // ✅ IMMEDIATE NOTIFICATION FOR RELIABILITY
+  // Send notification immediately when event is processed to avoid timeout failures
+  try {
+    const dbManager = new DatabaseManager();
+
+    // Try to get intent data from stored intents first, then from contract
+    let storedRawIntent = storedIntents.get(intentHash.toLowerCase());
+    let intentData = null;
+
+    if (!storedRawIntent) {
+      try {
+        // Fetch from contract as fallback
+        const escrowContract = global.provider ? new ethers.Contract(CONTRACT_ADDRESS, require('../config/web3-config').contractABI, global.provider) : null;
+        if (escrowContract) {
+          intentData = await retryWithBackoff(() => escrowContract.getIntent(intentHash), 5, 1000);
+
+          // Create notification data from contract data
+          storedRawIntent = {
+            intentHash: intentHash.toLowerCase(),
+            depositId: intentData.intent.depositId ? Number(intentData.intent.depositId) : 0,
+            owner: intentData.intent.owner,
+            to: intentData.intent.to,
+            amount: intentData.intent.amount.toString(),
+            verifier: intentData.intent.paymentVerifier,
+            fiatCurrency: intentData.intent.fiatCurrency,
+            conversionRate: intentData.intent.conversionRate.toString(),
+            paymentVerifier: intentData.intent.paymentVerifier // Add for notification logic
+          };
+        }
+      } catch (error) {
+        console.log(`⚠️ Could not fetch contract data for ${intentHash}, will use basic notification`);
+      }
+    }
+
+    if (storedRawIntent) {
+      console.log(`📤 Sending immediate pruned notification for ${intentHash}`);
+      const interestedUsers = await dbManager.getUsersInterestedInDeposit(storedRawIntent.depositId || 0);
+      if (interestedUsers.length > 0) {
+        await sendPrunedNotification(storedRawIntent, notificationTxHash);
+        console.log(`✅ Sent immediate pruned notification for ${intentHash} to ${interestedUsers.length} users`);
+      } else {
+        console.log(`📭 No users interested in deposit, skipped immediate notification for ${intentHash}`);
+      }
+    } else {
+      console.log(`⚠️ No intent data available for immediate notification for ${intentHash}`);
+    }
+  } catch (error) {
+    console.error(`❌ Error sending immediate pruned notification for ${intentHash}:`, error);
+    // Continue with batch processing even if immediate notification fails
+  }
   const intentHashLower = intentHash.toLowerCase();
 
   // ✅ DELAY PRUNED NOTIFICATION TO ALLOW FULFILLED TO BE PROCESSED FIRST
