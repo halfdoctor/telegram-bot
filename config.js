@@ -178,6 +178,5 @@ module.exports = {
   getPlatformName,
   currencyHashToCode,
   formatConversionRate,
-  CONTRACT_ADDRESS: process.env.CONTRACT_ADDRESS,
-  WEBHOOK_URL: process.env.WEBHOOK_URL
+  CONTRACT_ADDRESS: process.env.CONTRACT_ADDRESS
 };
