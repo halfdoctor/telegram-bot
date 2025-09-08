@@ -446,8 +446,15 @@ async function handleIntentFulfilled(parsed, log) {
     txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
     Web3State.setTransactionState(txHash, txData);
 
-    // Schedule processing
-    scheduleTransactionProcessing(txHash);
+    // Schedule processing, or process immediately if transaction already has events (both fulfilled and pruned)
+    const existingTxData = Web3State.getTransactionState(txHash);
+    if (existingTxData && (existingTxData.fulfilled.size > 0 && existingTxData.pruned.size > 0)) {
+      console.log(`🎯 Transaction ${txHash} has both fulfilled and pruned - processing immediately`);
+      const { processCompletedTransaction } = require('../transactions/transaction-manager');
+      await processCompletedTransaction(txHash);
+    } else {
+      scheduleTransactionProcessing(txHash);
+    }
   } catch (error) {
     console.error(`❌ Error fetching intent data for ${intentHash}:`, error);
     // Fallback to original behavior if contract call fails
@@ -482,7 +489,15 @@ async function handleIntentFulfilled(parsed, log) {
     txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
     Web3State.setTransactionState(txHash, txData);
 
-    scheduleTransactionProcessing(txHash);
+    // Schedule processing, or process immediately if transaction already has events
+    const fallbackTxData = Web3State.getTransactionState(txHash);
+    if (fallbackTxData && (fallbackTxData.fulfilled.size > 0 && fallbackTxData.pruned.size > 0)) {
+      console.log(`🎯 Transaction ${txHash} has both fulfilled and pruned (fallback) - processing immediately`);
+      const { processCompletedTransaction } = require('../transactions/transaction-manager');
+      await processCompletedTransaction(txHash);
+    } else {
+      scheduleTransactionProcessing(txHash);
+    }
 
     console.log(`📝 IntentFulfilled collected for batching (fallback mode) - depositId: ${depositId}`);
   }
