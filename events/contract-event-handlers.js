@@ -2,7 +2,7 @@ const { ethers } = require('ethers');
 const DatabaseManager = require('../scripts/database-manager.js');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
 const { Web3State, depositState } = require('../models/web3-state');
-const { sendSignaledNotification, sendPrunedNotification } = require('../notifications/telegram-notifications');
+const { sendSignaledNotification } = require('../notifications/telegram-notifications');
 const { scheduleTransactionProcessing } = require('../transactions/transaction-manager');
 const { checkSniperOpportunity } = require('../sniper/sniper-service');
 const {
@@ -13,23 +13,6 @@ const {
 } = require('../config/web3-config');
 // Import provider and contract from config module
 const { escrowContract } = require('../config.js');
-// Utility function for retry with exponential backoff
-async function retryWithBackoff(fn, maxRetries = 5, initialDelay = 1000) {
-  let delay = initialDelay;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (attempt === maxRetries) throw error;
-      console.log(`Attempt ${attempt} failed, retrying in ${delay}ms`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      delay *= 1.5;
-    }
-  }
-}
-// Module-level storage for intent data (reset on restart)
-const storedIntents = new Map();
-
 
 
 // Main event handler for contract events
@@ -60,11 +43,9 @@ const handleContractEvent = async (log) => {
         await handleIntentFulfilled(parsed, log);
         break;
 
-      case 'IntentPruned': {
-        const { intentHash } = parsed.args;
+      case 'IntentPruned':
         await handleIntentPruned(parsed, log);
         break;
-      }
 
       case 'DepositReceived':
         await handleDepositReceived(parsed, log);
@@ -383,8 +364,6 @@ async function handleIntentSignaled(parsed, log) {
   // Send immediate notification for signaled intent
   const notificationTxHash = log.transactionHash;
   await sendSignaledNotification(rawIntent, notificationTxHash);
-  // Store intent data for potential pruned events
-  storedIntents.set(intentHash.toLowerCase(), rawIntent);
 }
 
 async function handleIntentFulfilled(parsed, log) {
@@ -407,6 +386,10 @@ async function handleIntentFulfilled(parsed, log) {
     timestamp: Math.floor(Date.now() / 1000)
   };
 
+  // Send immediate notification using event data
+  const notificationTxHash = log.transactionHash.toLowerCase();
+  const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
+  await sendFulfilledNotification(intentForNotification, notificationTxHash);
 
   try {
     // Fetch complete intent data from contract to get conversionRate and fiatCurrency
@@ -431,30 +414,17 @@ async function handleIntentFulfilled(parsed, log) {
     // Get transaction hash
     const txHash = log.transactionHash.toLowerCase();
 
-    // Add to pending transactions for processing - accumulate if exists
-    let txData = Web3State.getTransactionState(txHash);
-    if (!txData) {
-      txData = {
-        txHash,
-        fulfilled: new Set(),
-        pruned: new Set(),
-        rawIntents: new Map(),
-        processed: false
-      };
-    }
-    txData.fulfilled.add(intentHash.toLowerCase());
-    txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
-    Web3State.setTransactionState(txHash, txData);
+    // Add to pending transactions for processing
+    Web3State.setTransactionState(txHash, {
+      txHash,
+      fulfilled: new Set([intentHash.toLowerCase()]),
+      pruned: new Set(),
+      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
+      processed: false
+    });
 
-    // Schedule processing, or process immediately if transaction already has events (both fulfilled and pruned)
-    const existingTxData = Web3State.getTransactionState(txHash);
-    if (existingTxData && (existingTxData.fulfilled.size > 0 && existingTxData.pruned.size > 0)) {
-      console.log(`🎯 Transaction ${txHash} has both fulfilled and pruned - processing immediately`);
-      const { processCompletedTransaction } = require('../transactions/transaction-manager');
-      await processCompletedTransaction(txHash);
-    } else {
-      scheduleTransactionProcessing(txHash);
-    }
+    // Schedule processing
+    scheduleTransactionProcessing(txHash);
   } catch (error) {
     console.error(`❌ Error fetching intent data for ${intentHash}:`, error);
     // Fallback to original behavior if contract call fails
@@ -474,154 +444,35 @@ async function handleIntentFulfilled(parsed, log) {
 
     const txHash = log.transactionHash.toLowerCase();
 
-    // Add to pending transactions for processing - accumulate if exists
-    let txData = Web3State.getTransactionState(txHash);
-    if (!txData) {
-      txData = {
-        txHash,
-        fulfilled: new Set(),
-        pruned: new Set(),
-        rawIntents: new Map(),
-        processed: false
-      };
-    }
-    txData.fulfilled.add(intentHash.toLowerCase());
-    txData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
-    Web3State.setTransactionState(txHash, txData);
+    Web3State.setTransactionState(txHash, {
+      txHash,
+      fulfilled: new Set([intentHash.toLowerCase()]),
+      pruned: new Set(),
+      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
+      processed: false
+    });
 
-    // Schedule processing, or process immediately if transaction already has events
-    const fallbackTxData = Web3State.getTransactionState(txHash);
-    if (fallbackTxData && (fallbackTxData.fulfilled.size > 0 && fallbackTxData.pruned.size > 0)) {
-      console.log(`🎯 Transaction ${txHash} has both fulfilled and pruned (fallback) - processing immediately`);
-      const { processCompletedTransaction } = require('../transactions/transaction-manager');
-      await processCompletedTransaction(txHash);
-    } else {
-      scheduleTransactionProcessing(txHash);
-    }
+    scheduleTransactionProcessing(txHash);
 
     console.log(`📝 IntentFulfilled collected for batching (fallback mode) - depositId: ${depositId}`);
   }
 }
 
 async function handleIntentPruned(parsed, log) {
-  const { intentHash } = parsed.args;
-  const depositId = parsed.args.depositId || 0;
+  const { intentHash, depositId } = parsed.args;
 
   console.log(`🚨 INTENT_PRUNED EVENT RECEIVED:`);
+  console.log(`   - Deposit ID: ${depositId}`);
   console.log(`   - Intent Hash: ${intentHash}`);
   console.log(`   - Transaction Hash: ${log.transactionHash}`);
 
   const txHash = log.transactionHash.toLowerCase();
-  const notificationTxHash = log.transactionHash;
-
-  // ✅ IMMEDIATE NOTIFICATION FOR RELIABILITY
-  // Send notification immediately when event is processed to avoid timeout failures
-  try {
-    const dbManager = new DatabaseManager();
-
-    // Try to get intent data from stored intents first, then from contract
-    let storedRawIntent = storedIntents.get(intentHash.toLowerCase());
-    let intentData = null;
-
-    if (!storedRawIntent) {
-      try {
-        // Fetch from contract as fallback
-        const escrowContract = global.provider ? new ethers.Contract(CONTRACT_ADDRESS, require('../config/web3-config').contractABI, global.provider) : null;
-        if (escrowContract) {
-          intentData = await retryWithBackoff(() => escrowContract.getIntent(intentHash), 5, 1000);
-
-          // Create notification data from contract data
-          storedRawIntent = {
-            intentHash: intentHash.toLowerCase(),
-            depositId: intentData.intent.depositId ? Number(intentData.intent.depositId) : 0,
-            owner: intentData.intent.owner,
-            to: intentData.intent.to,
-            amount: intentData.intent.amount.toString(),
-            verifier: intentData.intent.paymentVerifier,
-            fiatCurrency: intentData.intent.fiatCurrency,
-            conversionRate: intentData.intent.conversionRate.toString(),
-            paymentVerifier: intentData.intent.paymentVerifier // Add for notification logic
-          };
-        }
-      } catch (error) {
-        console.log(`⚠️ Could not fetch contract data for ${intentHash}, will use basic notification`);
-      }
-    }
-
-    if (storedRawIntent) {
-      console.log(`📤 Sending immediate pruned notification for ${intentHash}`);
-      const interestedUsers = await dbManager.getUsersInterestedInDeposit(storedRawIntent.depositId || 0);
-      if (interestedUsers.length > 0) {
-        await sendPrunedNotification(storedRawIntent, notificationTxHash);
-        console.log(`✅ Sent immediate pruned notification for ${intentHash} to ${interestedUsers.length} users`);
-      } else {
-        console.log(`📭 No users interested in deposit, skipped immediate notification for ${intentHash}`);
-      }
-    } else {
-      console.log(`⚠️ No intent data available for immediate notification for ${intentHash}`);
-    }
-  } catch (error) {
-    console.error(`❌ Error sending immediate pruned notification for ${intentHash}:`, error);
-    // Continue with batch processing even if immediate notification fails
-  }
-  const intentHashLower = intentHash.toLowerCase();
-
-  // ✅ DELAY PRUNED NOTIFICATION TO ALLOW FULFILLED TO BE PROCESSED FIRST
-  const eventKey = `${txHash}-${intentHashLower}`;
-
-  const notificationData = {
-    intentHash: intentHashLower,
-    txHash: notificationTxHash,
-    intentData: null // Will be populated from stored intent data
-  };
-
-  // Try to get stored intent data from previous signaled event (module-level Map first, then Web3State)
-  let storedRawIntent = null;
-  storedRawIntent = storedIntents.get(intentHashLower);
-  if (!storedRawIntent) {
-    for (const [hash, txData] of Web3State.getPendingTransactions()) {
-      if (txData.rawIntents.has(intentHashLower)) {
-        storedRawIntent = txData.rawIntents.get(intentHashLower);
-        break;
-      }
-    }
-  }
-
-  // Use the stored intent data for notification
-  if (storedRawIntent) {
-    notificationData.intentData = {
-      eventType: 'IntentPruned',
-      intentHash: intentHashLower,
-      depositId: storedRawIntent.depositId,
-      paymentVerifier: storedRawIntent.verifier,
-      owner: storedRawIntent.owner,
-      to: storedRawIntent.to,
-      amount: storedRawIntent.amount,
-      fiatCurrency: storedRawIntent.editorial,
-      conversionRate: storedRawIntent.conversionRate,
-      timestamp: Math.floor(Date.now() / 1000)
-    };
-  } else {
-    // Fallback notification data if no stored intent
-    notificationData.intentData = {
-      eventType: 'IntentPruned',
-      intentHash: intentHashLower,
-      depositId: Number(depositId),
-      paymentVerifier: 'unknown',
-      owner: 'unknown',
-      to: 'unknown',
-      amount: '0',
-      fiatCurrency: '0x0000000000000000000000000000000000000000000000000000000000000000',
-      conversionRate: '0',
-      timestamp: Math.floor(Date.now() / 1000)
-    };
-  }
 
   try {
     // Import globally available escrowContract - should be set up by main application
 
     // Fetch the full intent data from the contract since IntentPruned event only has intentHash and depositId
-    const intentData = await retryWithBackoff(() => escrowContract.getIntent(intentHash), 5, 1000);
+    const intentData = await escrowContract.getIntent(intentHash);
 
     console.log(`📊 Retrieved intent data for pruned intent ${intentHash}:`, {
       owner: intentData.intent.owner,
@@ -632,26 +483,16 @@ async function handleIntentPruned(parsed, log) {
       conversionRate: intentData.intent.conversionRate.toString()
     });
 
-    // Use stored data if contract returns zeros
-    const useData = intentData.intent.amount !== 0 ? intentData.intent : (storedRawIntent ? {
-      owner: storedRawIntent.owner,
-      to: storedRawIntent.to,
-      amount: storedRawIntent.amount,
-      paymentVerifier: storedRawIntent.verifier,
-      fiatCurrency: storedRawIntent.fiatCurrency,
-      conversionRate: storedRawIntent.conversionRate
-    } : intentData.intent);
-
-    let rawIntent = {
+    const rawIntent = {
       eventType: 'IntentPruned',
       intentHash: intentHash.toLowerCase(),
       depositId: Number(depositId),
-      owner: useData.owner,
-      to: useData.to,
-      amount: useData.amount.toString(),
-      verifier: useData.paymentVerifier,
-      fiatCurrency: useData.fiatCurrency,
-      conversionRate: useData.conversionRate.toString()
+      owner: intentData.intent.owner,
+      to: intentData.intent.to,
+      amount: intentData.intent.amount.toString(),
+      verifier: intentData.intent.paymentVerifier,
+      fiatCurrency: intentData.intent.fiatCurrency,
+      conversionRate: intentData.intent.conversionRate.toString()
     };
 
     // Get existing transaction state or create new
