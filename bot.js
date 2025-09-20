@@ -116,10 +116,14 @@ const initializeBot = async () => {
     
     console.log('📝 Initializing user in database...');
     await db.initUser(ZKP2P_GROUP_ID, 'zkp2p_channel');
-    
+
     console.log('📝 Setting listen all to true...');
     await db.setUserListenAll(ZKP2P_GROUP_ID, true);
     await db.setUserThreshold(ZKP2P_GROUP_ID, 0.1);
+
+    // Set up persistent menu in bot description
+    console.log('📝 Setting up persistent menu...');
+    await setupPersistentMenu();
 
     console.log(`📤 Attempting to send message to topic ${ZKP2P_TOPIC_ID} in group ${ZKP2P_GROUP_ID}`);
 
@@ -162,9 +166,98 @@ const initializeBot = async () => {
 // Start initialization after a delay
 setTimeout(initializeBot, 3000);
 
+// Persistent menu setup function
+async function setupPersistentMenu() {
+  try {
+    const menuDescription = `🤖 **ZKP2P Trading Bot**
+
+*Real-time cryptocurrency trading with:* ✨
+• 📊 Deposit tracking & notifications
+• 🎯 Arbitrage sniping alerts
+• 📈 Multi-platform support
+• ⚡ Instant trade matching
+
+*Quick Access Menu:*`;
+
+    const persistentMenu = {
+      inline_keyboard: [
+        [
+          { text: '📊 Track Deposits', callback_data: 'menu_deposits' },
+          { text: '🎯 Setup Sniper', callback_data: 'menu_snipers' }
+        ],
+        [
+          { text: '📋 View Status', callback_data: 'action_list' },
+          { text: '📈 LP Analysis', callback_data: 'prompt_lp_analysis' }
+        ],
+        [
+          { text: '🔧 Settings', callback_data: 'menu_settings' },
+          { text: '❓ Help', callback_data: 'action_help' }
+        ]
+      ]
+    };
+
+    // Set bot description with menu (this appears in bot profile and start messages)
+    await bot.setMyDescription(menuDescription);
+
+    // Note: setMyCommands is the closest to a persistent menu button in Telegram
+    await bot.setMyCommands([
+      { command: 'menu', description: 'Open interactive menu' },
+      { command: 'start', description: 'Start using the bot' },
+      { command: 'status', description: 'Check bot status' },
+      { command: 'list', description: 'View tracked deposits' }
+    ]);
+
+    console.log('✅ Persistent menu setup completed');
+  } catch (error) {
+    console.error('❌ Failed to setup persistent menu:', error);
+  }
+}
+
   
 
 // Telegram commands - now using database
+
+// Welcome message with persistent menu
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Initialize user
+  await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
+
+  const welcomeMessage = `🤖 **Welcome to ZKP2P Trading Bot!**
+
+I'm your intelligent cryptocurrency trading assistant, providing:
+• 📊 Real-time deposit tracking and notifications
+• 🎯 Advanced arbitrage sniping with customizable thresholds
+• 📈 Multi-platform payment integration (CashApp, Venmo, etc.)
+• ⚡ Instant trade matching and execution monitoring
+
+*Get started with the interactive menu below or use these commands:*
+• \`/menu\` - Open interactive menu
+• \`/status\` - Check system status
+• \`/list\` - View tracked deposits
+• \`/deposit all\` - Track all deposits`;
+
+  await bot.sendMessage(chatId, welcomeMessage, {
+    parse_mode: 'Markdown',
+    reply_markup: createMainMenu()
+  });
+});
+
+// Persistent menu access command
+bot.onText(/\/quickmenu/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const quickMenuMessage = `🎛️ **Quick Access Menu**
+
+Use these buttons for instant access to main functions:`;
+
+  await bot.sendMessage(chatId, quickMenuMessage, {
+    parse_mode: 'Markdown',
+    reply_markup: createMainMenu()
+  });
+});
+
 bot.onText(/\/deposit (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const input = match[1].trim().toLowerCase();
