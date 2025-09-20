@@ -467,12 +467,17 @@ class DatabaseManager {
       .from('user_snipers')
       .select('chat_id, currency, platform, created_at')
       .eq('currency', currency.toUpperCase())
+      .eq('is_active', true)
       .gte('created_at', thirtyDaysAgoFormatted);
 
-    // If platform is specified, match exactly OR get users with null platform (all platforms)
+    // If platform is specified, only get users who specifically want this platform OR all platforms
+    // If platform is null, only get users who want all platforms (null platform)
     if (platform) {
       // Get users who either specified this platform OR want all platforms (null)
       query = query.or(`platform.eq.${platform.toLowerCase()},platform.is.null`);
+    } else {
+      // No platform specified - only get users who want all platforms
+      query = query.is('platform', null);
     }
 
     const { data, error } = await query;

@@ -457,8 +457,8 @@ bot.onText(/\/unsnipe (.+)/, async (msg, match) => {
   const platform = parts[1] ? parts[1].toLowerCase() : null;
   
   // Check if this is a group chat and user is not admin
-  if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
-    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
     return;
   }
 
@@ -1096,8 +1096,8 @@ Questions? The menu system makes everything easier! 🚀
 
     else if (data === 'prompt_deposit_threshold') {
       // Check if this is a group chat and user is not admin
-      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
-        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+      if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+        bot.sendMessage(chatId, getRestrictedMessage());
         return;
       }
 
@@ -1113,8 +1113,8 @@ Questions? The menu system makes everything easier! 🚀
 
     else if (data === 'confirm_clearall_confirmed') {
       // Check if this is a group chat and user is not admin
-      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
-        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ This command is restricted in group chats. Only group administrators can perform database write operations.' });
+      if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+        bot.sendMessage(chatId, getRestrictedMessage());
         return;
       }
   
