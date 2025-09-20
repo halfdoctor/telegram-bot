@@ -20,19 +20,30 @@ async function getDuneData(force = false, depositor = null) {
         throw new Error("DUNE_API_KEY not found in .env file");
     }
 
-    try {
-        const stats = await fs.stat(CACHE_FILE);
-        const cacheAge = Date.now() - stats.mtimeMs;
-        if (cacheAge < CACHE_DURATION_MS) {
-            const cachedData = await fs.readFile(CACHE_FILE, 'utf8');
-            const cached = JSON.parse(cachedData);
+    // If force is true, always fetch fresh data
+    if (force) {
+        console.log(`Force refresh requested${depositor ? ` for depositor: ${depositor}` : ''}...`);
+    } else {
+        try {
+            const stats = await fs.stat(CACHE_FILE);
+            const cacheAge = Date.now() - stats.mtimeMs;
 
-            // If depositor is specified, check if cache contains data for this depositor
-            // Note: Cache should contain ALL depositors if the Dune query is properly configured
-            if (depositor) {
+            // Only use cache if it's less than 24 hours old
+            if (cacheAge < CACHE_DURATION_MS) {
+                const cachedData = await fs.readFile(CACHE_FILE, 'utf8');
+                const cached = JSON.parse(cachedData);
+
+                // If no specific depositor requested, return full cached data
+                if (!depositor) {
+                    console.log("Returning cached Dune data.");
+                    return cached;
+                }
+
+                // If depositor is specified, check if cache contains data for this depositor
                 const cachedDepositor = cached.result.rows.find(
                     row => row.depositor && row.depositor.toLowerCase() === depositor.toLowerCase()
                 );
+
                 if (cachedDepositor) {
                     console.log(`Using cached data for depositor: ${depositor}`);
                     // Return filtered result with only this depositor's data
@@ -52,15 +63,12 @@ async function getDuneData(force = false, depositor = null) {
                     console.log(`Cache does not contain data for depositor: ${depositor}, fetching fresh data`);
                 }
             } else {
-                if (!force) {
-                    console.log("Returning cached Dune data.");
-                    return cached;
-                }
+                console.log(`Cache is older than ${CACHE_DURATION_MS / (60 * 60 * 1000)} hours, fetching fresh data`);
             }
-        }
-    } catch (error) {
-        if (error.code !== 'ENOENT') {
-            console.warn("Could not read cache file:", error);
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                console.warn("Could not read cache file:", error);
+            }
         }
     }
 
