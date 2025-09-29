@@ -572,7 +572,7 @@ class DatabaseManager {
       console.error('Error getting user threshold:', error);
     }
 
-    return data?.threshold || 0.5; // Default 0.5%
+    return data?.threshold ?? 0.5; // Returns 0 when threshold is 0
   }
 
   async setUserThreshold(chatId, threshold) {
