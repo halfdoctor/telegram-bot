@@ -474,6 +474,10 @@ async function handleIntentPruned(parsed, log) {
 
   let rawIntent;
 
+  // Send immediate notification for pruned intent (similar to signaled/fulfilled)
+  const notificationTxHash = log.transactionHash;
+  const { sendPrunedNotification } = require('../notifications/telegram-notifications');
+
   try {
     // First, try to get intent data from database (persistent storage)
     const dbManager = new DatabaseManager();
