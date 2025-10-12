@@ -3,10 +3,10 @@ const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
 const fs = require('fs');
 
-// Supabase setup
+// Supabase setup - Using service role key to bypass RLS for backend operations
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 // Initialize ethers provider
