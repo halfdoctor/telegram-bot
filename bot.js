@@ -84,8 +84,6 @@ function getRestrictedMessage() {
   return '❌ This command is restricted in group chats. You can get a personal bot by searching for @zkp2p_bot .';
 }
 
-const ZKP2P_GROUP_ID = -1001928949520;
-const ZKP2P_TOPIC_ID = 5385;
 const ZKP2P_SNIPER_TOPIC_ID = 5671;
 
 const initializeBot = async () => {
@@ -114,37 +112,11 @@ const initializeBot = async () => {
     // Wait for all systems to be ready
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    console.log('📝 Initializing user in database...');
-    await db.initUser(ZKP2P_GROUP_ID, 'zkp2p_channel');
-
-    console.log('📝 Setting listen all to true...');
-    await db.setUserListenAll(ZKP2P_GROUP_ID, true);
-    await db.setUserThreshold(ZKP2P_GROUP_ID, 0.1);
 
     // Set up persistent menu in bot description
     console.log('📝 Setting up persistent menu...');
     await setupPersistentMenu();
 
-    console.log(`📤 Attempting to send message to topic ${ZKP2P_TOPIC_ID} in group ${ZKP2P_GROUP_ID}`);
-
-    // Test message sending with better error handling (optional)
-    try {
-      const result = await bot.sendMessage(ZKP2P_GROUP_ID, '🔄 Bot restarted and ready!', {
-        parse_mode: 'Markdown',
-        message_thread_id: ZKP2P_TOPIC_ID,
-      });
-
-      console.log('✅ Initialization message sent successfully!');
-      console.log('📋 Message details:', {
-        message_id: result.message_id,
-        chat_id: result.chat.id,
-        thread_id: result.message_thread_id,
-        is_topic_message: result.is_topic_message
-      });
-    } catch (telegramError) {
-      console.log('⚠️ Could not send initialization message to group (this is optional):', telegramError.message);
-      console.log('✅ Bot is still fully functional for individual users!');
-    }
   // Start the deposit monitor
   startDepositMonitor(bot);
     
@@ -169,9 +141,9 @@ setTimeout(initializeBot, 3000);
 // Persistent menu setup function
 async function setupPersistentMenu() {
   try {
-    const menuDescription = `🤖 **ZKP2P Trading Bot**
+    const menuDescription = `🤖 **ZKP2P Monitoring Bot**
 
-*Real-time cryptocurrency trading with:* ✨
+*Real-time cryptocurrency monitoring with:* ✨
 • 📊 Deposit tracking & notifications
 • 🎯 Arbitrage sniping alerts
 • 📈 Multi-platform support
@@ -224,9 +196,9 @@ bot.onText(/\/start/, async (msg) => {
   // Initialize user
   await db.initUser(chatId, msg.from.username, msg.from.first_name, msg.from.last_name);
 
-  const welcomeMessage = `🤖 **Welcome to ZKP2P Trading Bot!**
+  const welcomeMessage = `🤖 **Welcome to ZKP2P Monitoring Bot!**
 
-I'm your intelligent cryptocurrency trading assistant, providing:
+I'm your intelligent cryptocurrency monitoring assistant, providing:
 • 📊 Real-time deposit tracking and notifications
 • 🎯 Advanced arbitrage sniping with customizable thresholds
 • 📈 Multi-platform payment integration (CashApp, Venmo, etc.)
@@ -601,12 +573,12 @@ const createDepositMenu = () => {
         { text: '🔍 Search Specific Deposit', callback_data: 'prompt_deposit_search' }
       ],
       [
-        { text: '🌐 Listen to ALL Deposits', callback_data: 'action_deposit_all' },
+        { text: '🌐 Listen to ALL', callback_data: 'action_deposit_all' },
         { text: '🛑 Stop Listening to All', callback_data: 'action_deposit_stop' }
       ],
       [
-        { text: '➕ Track Specific Deposit', callback_data: 'prompt_deposit_add' },
-        { text: '➖ Remove Specific Deposit', callback_data: 'prompt_deposit_remove' }
+        { text: '➕ Track Deposit', callback_data: 'prompt_deposit_add' },
+        { text: '➖ Remove Deposit', callback_data: 'prompt_deposit_remove' }
       ],
       [
         { text: '📊 Set Deposit Alert Threshold', callback_data: 'prompt_deposit_threshold' }
@@ -1189,14 +1161,14 @@ Questions? The menu system makes everything easier! 🚀
 
     else if (data === 'prompt_deposit_threshold') {
       // Check if this is a group chat and user is not admin
-      if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+      if (isGroupChat(callbackQuery.message.chat.type) && !(await isUserAdmin(bot, chatId, callbackQuery.from.id))) {
         bot.sendMessage(chatId, getRestrictedMessage());
         return;
       }
 
       // Set the user's state to indicate we are waiting for their threshold input
       userStates.set(chatId, 'awaiting_deposit_threshold');
-    
+
       // Ask the user for the new threshold
       bot.sendMessage(chatId, 'Please enter the new deposit alert threshold (e.g., 0.5 for 0.5%).\n\nThis threshold is used to notify you 4 hourly about your tracked deposits that are LESS than the market rate by your given percentage. (default value 0.25%)');
       

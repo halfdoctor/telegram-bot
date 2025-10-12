@@ -185,16 +185,6 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
   const dbManager = new DatabaseManager();
   const interestedUsers = await dbManager.getUsersWithSniper(currencyCode, platformName);
 
-  // Add default group if not already included
-  const groupId = EXPLORER_CONFIG.ZKP2P_GROUP_ID;
-  if (!interestedUsers.some(user => user.chat_id === groupId)) {
-    interestedUsers.push({
-      chat_id: groupId,
-      currency: currencyCode,
-      platform: platformName,
-      created_at: new Date().toISOString()
-    });
-  }
 
   if (interestedUsers.length > 0) {
     for (const user of interestedUsers) {
