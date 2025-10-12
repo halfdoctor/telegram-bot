@@ -350,6 +350,10 @@ async function handleIntentSignaled(parsed, log) {
     timestamp: Number(timestamp)
   };
 
+  // Store intent data in database for persistence
+  const dbManager = new DatabaseManager();
+  await dbManager.storeIntentData(rawIntent);
+
   // Get transaction hash
   const txHash = log.transactionHash.toLowerCase();
   console.log(`📝 Processing in transaction ${txHash}`);
@@ -468,32 +472,56 @@ async function handleIntentPruned(parsed, log) {
 
   const txHash = log.transactionHash.toLowerCase();
 
+  let rawIntent;
+
   try {
-    // Import globally available escrowContract - should be set up by main application
+    // First, try to get intent data from database (persistent storage)
+    const dbManager = new DatabaseManager();
+    const dbIntentData = await dbManager.getIntentData(intentHash);
 
-    // Fetch the full intent data from the contract since IntentPruned event only has intentHash and depositId
-    const intentData = await escrowContract.getIntent(intentHash);
+    if (dbIntentData && dbIntentData.amount && dbIntentData.amount !== '0') {
+      console.log(`📊 Retrieved intent data from database for pruned intent ${intentHash}`);
+      rawIntent = {
+        eventType: 'IntentPruned',
+        intentHash: intentHash.toLowerCase(),
+        depositId: Number(depositId),
+        owner: dbIntentData.owner,
+        to: dbIntentData.to,
+        amount: dbIntentData.amount,
+        verifier: dbIntentData.verifier,
+        fiatCurrency: dbIntentData.fiat_currency,
+        conversionRate: dbIntentData.conversion_rate,
+        timestamp: dbIntentData.timestamp
+      };
+    } else {
+      // Fallback to contract data if not in database
+      console.log(`📊 Database data not available, trying contract for pruned intent ${intentHash}`);
 
-    console.log(`📊 Retrieved intent data for pruned intent ${intentHash}:`, {
-      owner: intentData.intent.owner,
-      to: intentData.intent.to,
-      amount: intentData.intent.amount.toString(),
-      paymentVerifier: intentData.intent.paymentVerifier,
-      fiatCurrency: intentData.intent.fiatCurrency,
-      conversionRate: intentData.intent.conversionRate.toString()
-    });
+      // Import globally available escrowContract - should be set up by main application
+      // Fetch the full intent data from the contract since IntentPruned event only has intentHash and depositId
+      const intentData = await escrowContract.getIntent(intentHash);
 
-    const rawIntent = {
-      eventType: 'IntentPruned',
-      intentHash: intentHash.toLowerCase(),
-      depositId: Number(depositId),
-      owner: intentData.intent.owner,
-      to: intentData.intent.to,
-      amount: intentData.intent.amount.toString(),
-      verifier: intentData.intent.paymentVerifier,
-      fiatCurrency: intentData.intent.fiatCurrency,
-      conversionRate: intentData.intent.conversionRate.toString()
-    };
+      console.log(`📊 Retrieved intent data from contract for pruned intent ${intentHash}:`, {
+        owner: intentData.intent.owner,
+        to: intentData.intent.to,
+        amount: intentData.intent.amount.toString(),
+        paymentVerifier: intentData.intent.paymentVerifier,
+        fiatCurrency: intentData.intent.fiatCurrency,
+        conversionRate: intentData.intent.conversionRate.toString()
+      });
+
+      rawIntent = {
+        eventType: 'IntentPruned',
+        intentHash: intentHash.toLowerCase(),
+        depositId: Number(depositId),
+        owner: intentData.intent.owner,
+        to: intentData.intent.to,
+        amount: intentData.intent.amount.toString(),
+        verifier: intentData.intent.paymentVerifier,
+        fiatCurrency: intentData.intent.fiatCurrency,
+        conversionRate: intentData.intent.conversionRate.toString()
+      };
+    }
 
     // Get existing transaction state or create new
     let txData = Web3State.getTransactionState(txHash);

@@ -617,6 +617,43 @@ class DatabaseManager {
 
     return data?.deposit_threshold;
   }
+
+  // Store full intent data for persistence
+  async storeIntentData(rawIntent) {
+    const { error } = await supabase
+      .from('intent_data')
+      .upsert({
+        intent_hash: rawIntent.intentHash.toLowerCase(),
+        deposit_id: rawIntent.depositId,
+        fiat_currency: rawIntent.fiatCurrency.toLowerCase(),
+        conversion_rate: rawIntent.conversionRate,
+        verifier: rawIntent.verifier.toLowerCase(),
+        owner: rawIntent.owner.toLowerCase(),
+        to: rawIntent.to.toLowerCase(),
+        amount: rawIntent.amount,
+        timestamp: rawIntent.timestamp
+      }, {
+        onConflict: 'intent_hash'
+      });
+
+    if (error) console.error('Error storing intent data:', error);
+  }
+
+  // Retrieve full intent data by intent hash
+  async getIntentData(intentHash) {
+    const { data, error } = await supabase
+      .from('intent_data')
+      .select('*')
+      .eq('intent_hash', intentHash.toLowerCase())
+      .single();
+
+    if (error) {
+      console.error('Error retrieving intent data:', error);
+      return null;
+    }
+
+    return data;
+  }
 }
 
 module.exports = DatabaseManager;

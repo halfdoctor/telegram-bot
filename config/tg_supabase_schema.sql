@@ -23,6 +23,10 @@ CREATE TABLE public.intent_data (
   fiat_currency text NOT NULL,
   conversion_rate text NOT NULL,
   verifier text NOT NULL,
+  owner text,
+  "to" text,
+  amount text,
+  timestamp bigint,
   CONSTRAINT intent_data_pkey PRIMARY KEY (intent_hash)
 );
 CREATE TABLE public.sniper_alerts (
