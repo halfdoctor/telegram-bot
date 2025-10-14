@@ -474,9 +474,20 @@ async function handleIntentPruned(parsed, log) {
 
   let rawIntent;
 
-  // Send immediate notification for pruned intent (similar to signaled/fulfilled)
+  // Send immediate notification for pruned intent if no fulfilled event exists in same transaction
   const notificationTxHash = log.transactionHash;
   const { sendPrunedNotification } = require('../notifications/telegram-notifications');
+
+  // Check if there's a fulfilled event for this intent in the same transaction
+  const existingTxData = Web3State.getTransactionState(txHash);
+  const hasFulfilledEvent = existingTxData?.fulfilled?.has(intentHash.toLowerCase());
+
+  if (hasFulfilledEvent) {
+    console.log(`⚠️ Skipping pruned notification for ${intentHash} - fulfilled event already exists in transaction ${txHash}`);
+  } else {
+    console.log(`🚨 Sending immediate pruned notification for ${intentHash}`);
+    await sendPrunedNotification(rawIntent, notificationTxHash);
+  }
 
   try {
     // First, try to get intent data from database (persistent storage)
