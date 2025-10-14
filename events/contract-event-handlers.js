@@ -474,21 +474,6 @@ async function handleIntentPruned(parsed, log) {
 
   let rawIntent;
 
-  // Send immediate notification for pruned intent if no fulfilled event exists in same transaction
-  const notificationTxHash = log.transactionHash;
-  const { sendPrunedNotification } = require('../notifications/telegram-notifications');
-
-  // Check if there's a fulfilled event for this intent in the same transaction
-  const existingTxData = Web3State.getTransactionState(txHash);
-  const hasFulfilledEvent = existingTxData?.fulfilled?.has(intentHash.toLowerCase());
-
-  if (hasFulfilledEvent) {
-    console.log(`⚠️ Skipping pruned notification for ${intentHash} - fulfilled event already exists in transaction ${txHash}`);
-  } else {
-    console.log(`🚨 Sending immediate pruned notification for ${intentHash}`);
-    await sendPrunedNotification(rawIntent, notificationTxHash);
-  }
-
   try {
     // First, try to get intent data from database (persistent storage)
     const dbManager = new DatabaseManager();
@@ -508,6 +493,21 @@ async function handleIntentPruned(parsed, log) {
         conversionRate: dbIntentData.conversion_rate,
         timestamp: dbIntentData.timestamp
       };
+
+      // Send immediate notification for pruned intent if no fulfilled event exists in same transaction
+      const notificationTxHash = log.transactionHash;
+      const { sendPrunedNotification } = require('../notifications/telegram-notifications');
+
+      // Check if there's a fulfilled event for this intent in the same transaction
+      const existingTxData = Web3State.getTransactionState(txHash);
+      const hasFulfilledEvent = existingTxData?.fulfilled?.has(intentHash.toLowerCase());
+
+      if (!hasFulfilledEvent) {
+        console.log(`🚨 Sending immediate pruned notification for ${intentHash}`);
+        await sendPrunedNotification(rawIntent, notificationTxHash);
+      } else {
+        console.log(`⚠️ Skipping pruned notification for ${intentHash} - fulfilled event already exists in transaction ${txHash}`);
+      }
     } else {
       // Fallback to contract data if not in database
       console.log(`📊 Database data not available, trying contract for pruned intent ${intentHash}`);

@@ -61,18 +61,24 @@ async function sendPrunedNotification(rawIntent, txHash) {
       return;
     }
 
-    const platformName = Utils.resolvePlatformName(rawIntent.paymentVerifier, rawIntent.owner, rawIntent.to);
+    // Use utility functions for consistent formatting with signaled notification
+    const platformName = Utils.resolvePlatformName(rawIntent.verifier, rawIntent.owner, rawIntent.to);
     const { currencyCode, currencyName } = Utils.getCurrencyInfo(rawIntent.fiatCurrency);
 
-    // Format message for pruned intents
-    const message = `🟠 *Intent Pruned*
+    // Calculate amounts using utilities (same as signaled notification)
+    const usdcAmount = Utils.convertFromMicrounits(rawIntent.amount);
+    const conversionRate = Utils.convertFromWei(rawIntent.conversionRate);
+    const fiatAmount = Utils.calculateFiatAmount(usdcAmount, conversionRate);
 
-❌ **Intent has been cancelled**
-💵 **Platform:** ${platformName}
-🔢 **Deposit ID:** ${rawIntent.depositId}
+    // Format message to match signaled notification format
+    const message = `🟠 *Intent Cancelled*
+
+🎯 **Deposit ID:** ${rawIntent.depositId}
+💰 **Amount:** ${usdcAmount.toFixed(2)} USDC
+🏦 **Platform:** ${platformName}
 🔗 **Transaction:** ${Utils.formatTxHash(txHash)}
 
-*The intent was pruned and no longer active.*`;
+*❌ The intent was cancelled and is no longer active.*`;
 
     // Send to interested users
     for (const chatId of interestedUsers) {
