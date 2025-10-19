@@ -23,11 +23,21 @@ app.get('/ping', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
+  const memUsage = process.memoryUsage();
   res.json({
     status: 'healthy',
     websocket: web3Service?.isConnected ? 'connected' : 'disconnected',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    memory_usage_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
+    health_manager: healthManager.getStatus(),
+    circuit_breaker: {
+      is_open: healthManager.isCircuitOpen,
+      restart_count: healthManager.restartCount,
+      time_until_reset: healthManager.isCircuitOpen ?
+        Math.round((healthManager.circuitBreakerTimeout - (Date.now() - healthManager.lastRestartTime)) / 1000) :
+        0
+    }
   });
 });
 
@@ -363,6 +373,22 @@ bot.onText(/\/clearall/, async (msg) => {
   bot.sendMessage(chatId, `🗑️ Cleared all tracked deposit IDs, stopped listening to all deposits, and cleared all sniper settings.`, { parse_mode: 'Markdown' });
 });
 
+bot.onText(/\/resetcb/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Check if this is a group chat and user is not admin
+  if (isGroupChat(msg.chat.type) && !(await isUserAdmin(bot, chatId, msg.from.id))) {
+    bot.sendMessage(chatId, getRestrictedMessage());
+    return;
+  }
+
+  const wasOpen = healthManager.isCircuitOpen;
+  healthManager.isCircuitOpen = false;
+  healthManager.restartCount = 0;
+
+  bot.sendMessage(chatId, `🔄 *Circuit Breaker Reset*\n\n${wasOpen ? '✅ Circuit breaker was open and has been reset' : 'ℹ️ Circuit breaker was already closed'}`, { parse_mode: 'Markdown' });
+});
+
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -413,9 +439,23 @@ bot.onText(/\/status/, async (msg) => {
       message += `${sniperTexts.join(', ')}\n`;
     }
 
+    // Add circuit breaker status
+    const healthStatus = healthManager.getStatus();
+    message += `\n🔌 *Circuit Breaker:*\n`;
+    message += `• *Status:* ${healthStatus.isCircuitOpen ? '🔴 Open' : '🟢 Closed'}\n`;
+    message += `• *Restart Count:* ${healthStatus.restartCount}\n`;
+
+    if (healthStatus.isCircuitOpen) {
+      const resetTime = new Date(healthStatus.lastRestartTime + 300000); // 5 minutes
+      message += `• *Auto-reset:* ${resetTime.toISOString()}\n`;
+    }
+
+    // Add memory info
+    const memUsage = process.memoryUsage();
+    message += `\n💾 *Memory:* ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)}MB\n`;
+
     // Add reconnection info if disconnected
     if (!wsConnected && web3Service) {
-      // Note: We don't expose reconnectAttempts in the current web3Service API
       message += `\n⚠️ *WebSocket:* Disconnected`;
     }
 
@@ -1861,10 +1901,115 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Health check interval
-setInterval(async () => {
-  if (web3Service && !web3Service.isConnected) {
-    console.log('🔍 Health check: WebSocket disconnected, attempting restart...');
-    await web3Service.restart();
+// Circuit breaker and health check system
+class HealthCheckManager {
+  constructor() {
+    this.maxRestartAttempts = 10;
+    this.restartCount = 0;
+    this.lastRestartTime = 0;
+    this.circuitBreakerTimeout = 300000; // 5 minutes
+    this.isCircuitOpen = false;
+    this.healthCheckInterval = 300000; // 5 minutes instead of 2
+    this.memoryThreshold = 100 * 1024 * 1024; // 100MB
+    this.restartAttempts = new Map(); // Track attempts per hour
   }
-}, 120000); // Check every two minutes
+
+  async checkHealth() {
+    try {
+      // Check memory usage
+      const memUsage = process.memoryUsage();
+      if (memUsage.heapUsed > this.memoryThreshold) {
+        console.log(`⚠️ High memory usage: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+        if (global.gc && memUsage.heapUsed > this.memoryThreshold * 1.5) {
+          console.log('🧹 Forcing garbage collection...');
+          global.gc();
+        }
+      }
+
+      // Check if circuit breaker is open
+      if (this.isCircuitOpen) {
+        const timeSinceLastRestart = Date.now() - this.lastRestartTime;
+        if (timeSinceLastRestart > this.circuitBreakerTimeout) {
+          console.log('🔄 Circuit breaker timeout expired, closing circuit...');
+          this.isCircuitOpen = false;
+          this.restartCount = 0;
+        } else {
+          console.log(`⏸️ Circuit breaker open, skipping health check (${Math.round((this.circuitBreakerTimeout - timeSinceLastRestart) / 1000)}s remaining)`);
+          return;
+        }
+      }
+
+      if (!web3Service) {
+        console.log('⚠️ Web3Service not initialized');
+        return;
+      }
+
+      if (!web3Service.isConnected) {
+        console.log(`🔍 Health check: WebSocket disconnected (attempt ${this.restartCount + 1}/${this.maxRestartAttempts})`);
+
+        // Check if we're exceeding restart rate limits
+        const currentHour = Math.floor(Date.now() / (1000 * 60 * 60));
+        const hourAttempts = this.restartAttempts.get(currentHour) || 0;
+
+        if (hourAttempts >= 5) { // Max 5 restarts per hour
+          console.log('🚫 Rate limit exceeded (5 restarts per hour), opening circuit breaker');
+          this.openCircuitBreaker();
+          return;
+        }
+
+        try {
+          await web3Service.restart();
+          this.restartCount++;
+          this.lastRestartTime = Date.now();
+
+          // Update hourly attempt counter
+          this.restartAttempts.set(currentHour, hourAttempts + 1);
+
+          if (this.restartCount >= this.maxRestartAttempts) {
+            console.log('🚫 Max restart attempts reached, opening circuit breaker');
+            this.openCircuitBreaker();
+          }
+        } catch (error) {
+          console.error('❌ Health check restart failed:', error);
+          this.restartCount++;
+          if (this.restartCount >= this.maxRestartAttempts) {
+            this.openCircuitBreaker();
+          }
+        }
+      } else {
+        // Reset counters on successful connection
+        if (this.restartCount > 0) {
+          console.log('✅ WebSocket reconnected successfully, resetting counters');
+          this.restartCount = 0;
+          this.isCircuitOpen = false;
+        }
+      }
+    } catch (error) {
+      console.error('❌ Health check error:', error);
+    }
+  }
+
+  openCircuitBreaker() {
+    this.isCircuitOpen = true;
+    this.restartCount = 0;
+    this.lastRestartTime = Date.now();
+    console.log(`🔌 Circuit breaker opened for ${this.circuitBreakerTimeout / 1000}s`);
+  }
+
+  getStatus() {
+    return {
+      restartCount: this.restartCount,
+      isCircuitOpen: this.isCircuitOpen,
+      lastRestartTime: this.lastRestartTime,
+      nextHealthCheck: new Date(Date.now() + this.healthCheckInterval).toISOString()
+    };
+  }
+}
+
+// Initialize health check manager
+const healthManager = new HealthCheckManager();
+
+// Enhanced health check interval with better error handling
+setInterval(async () => {
+  await healthManager.checkHealth();
+}, healthManager.healthCheckInterval);

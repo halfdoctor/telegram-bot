@@ -83,18 +83,40 @@ class ResilientWebSocketProvider {
   async cleanup() {
     if (this.provider) {
       try {
+        console.log('🧹 Starting provider cleanup...');
+
         // Stop keep-alive first
         this.stopKeepAlive();
 
+        // Track if we had a websocket to clean up
+        const hadWebSocket = this.provider._websocket;
+
         // Remove all listeners first
-        this.provider.removeAllListeners();
+        if (typeof this.provider.removeAllListeners === 'function') {
+          this.provider.removeAllListeners();
+        }
 
         // Close WebSocket connection if it exists
         if (this.provider._websocket) {
-          this.provider._websocket.removeAllListeners();
-          if (this.provider._websocket.readyState === WEBSOCKET_STATES.OPEN) {
-            this.provider._websocket.close(1000, 'Normal closure'); // Proper close code
+          const ws = this.provider._websocket;
+
+          // Remove all websocket listeners
+          ws.removeAllListeners();
+
+          if (ws.readyState === WEBSOCKET_STATES.OPEN) {
+            console.log('🔌 Closing WebSocket connection...');
+            ws.close(1000, 'Normal closure');
           }
+
+          // Wait for close event or timeout
+          await new Promise((resolve) => {
+            const timeout = setTimeout(resolve, 2000);
+
+            ws.once('close', () => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
         }
 
         // Destroy provider
@@ -102,9 +124,14 @@ class ResilientWebSocketProvider {
           await this.provider.destroy();
         }
 
-        console.log('🧹 Cleaned up existing provider');
+        // Clear references
+        this.provider = null;
+
+        console.log(`🧹 Provider cleanup completed ${hadWebSocket ? '(with WebSocket)' : '(no WebSocket)'}`);
       } catch (error) {
-        console.error('⚠️ Error during cleanup:', error.message);
+        console.error(`⚠️ Error during cleanup: ${error.message}`);
+        // Force cleanup even on error
+        this.provider = null;
       }
     }
   }
@@ -114,7 +141,20 @@ class ResilientWebSocketProvider {
 
     if (this.provider._websocket) {
       this.provider._websocket.on('close', (code, reason) => {
-        console.log(`🔌 WebSocket closed: ${code} - ${reason}`);
+        const closeReason = reason?.toString() || 'Unknown reason';
+        console.log(`🔌 WebSocket closed: Code ${code} - ${closeReason}`);
+
+        // Log specific close codes for better debugging
+        switch(code) {
+          case 1000: console.log('ℹ️ Normal closure'); break;
+          case 1006: console.log('⚠️ Abnormal closure - network issues or server restart'); break;
+          case 1008: console.log('⚠️ Policy violation - check API key or rate limits'); break;
+          case 1011: console.log('⚠️ Server error - remote server issue'); break;
+          case 1012: console.log('⚠️ Service restart - server restarting'); break;
+          case 1013: console.log('⚠️ Try again later - temporary server overload'); break;
+          default: console.log(`⚠️ Unexpected close code: ${code}`);
+        }
+
         this.stopKeepAlive();
         if (!this.isDestroyed) {
           // Add delay before reconnecting to avoid rapid reconnections
