@@ -405,23 +405,12 @@ async function handleIntentFulfilled(parsed, log) {
     intent.eventType === 'IntentPruned'
   );
 
-  // NEW: Check if there's a pending fulfilled event (this event) - if so, it should take priority
-  const hasPendingFulfilledEvent = Array.from(allIntentsInTx.values()).some(
-    intent => intent.intentHash.toLowerCase() === intentHash.toLowerCase() &&
-    intent.eventType === 'IntentFulfilled'
-  );
-
   if (!hasPrunedEvent && !hasPendingPrunedEvent) {
     const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
     await sendFulfilledNotification(intentForNotification, notificationTxHash);
     console.log(`✅ Sent immediate fulfilled notification for ${intentHash}`);
-  } else if (hasPendingFulfilledEvent) {
-    // If this fulfilled event is pending, it should take priority over any existing pruned events
-    const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
-    await sendFulfilledNotification(intentForNotification, notificationTxHash);
-    console.log(`✅ Sent immediate fulfilled notification for ${intentHash} (taking priority over pruned event)`);
   } else {
-    console.log(`⚠️ Skipping immediate fulfilled notification for ${intentHash} - pruned event exists and no pending fulfilled event`);
+    console.log(`⚠️ Skipping immediate fulfilled notification for ${intentHash} - pruned event already exists in transaction ${txHash}`);
   }
 
   try {
