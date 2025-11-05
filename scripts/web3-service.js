@@ -24,6 +24,10 @@ const {
   normalizedPlatformMapping
 } = require('../config/web3-config');
 
+// Import orchestrator contract address from config
+const { orchestratorContract } = require('../config.js');
+const orchestratorContractAddress = orchestratorContract.target;
+
 const {
   sendFulfilledNotification,
   sendPrunedNotification,
@@ -48,12 +52,18 @@ const {
 global.depositState = Web3State.getDepositState();
 global.pendingTransactions = Web3State.getPendingTransactions();
 
+// Import orchestrator event handler
+const { handleOrchestratorEvent } = require('../events/contract-event-handlers');
+
 // Web3Service class to manage all blockchain interactions
 class Web3Service {
-  constructor(wsUrl, eventHandler) {
+  constructor(wsUrl, eventHandler, orchestratorWsUrl, orchestratorEventHandler) {
     this.wsUrl = wsUrl || process.env.BASE_WS_URL;
     this.eventHandler = eventHandler || handleContractEvent;
+    this.orchestratorWsUrl = orchestratorWsUrl || process.env.BASE_WS_URL; // Use same WS URL for now
+    this.orchestratorEventHandler = orchestratorEventHandler || handleOrchestratorEvent;
     this.provider = null;
+    this.orchestratorProvider = null;
     this.isInitialized = false;
   }
 
@@ -63,16 +73,30 @@ class Web3Service {
     console.log('🔄 Initializing Web3Service...');
 
     try {
+      console.log(`📡 Creating escrow provider for contract: ${CONTRACT_ADDRESS}`);
+      // Initialize escrow provider (legacy)
       this.provider = new ResilientWebSocketProvider(
         this.wsUrl,
-        this.eventHandler
+        this.eventHandler,
+        CONTRACT_ADDRESS
+      );
+
+      console.log(`📡 Creating orchestrator provider for contract: ${orchestratorContractAddress}`);
+      // Initialize orchestrator provider (new)
+      this.orchestratorProvider = new ResilientWebSocketProvider(
+        this.orchestratorWsUrl,
+        this.orchestratorEventHandler,
+        orchestratorContractAddress
       );
 
       this.isInitialized = true;
 
-      // Attach provider to global for cross-module access
+      // Attach providers to global for cross-module access
       if (!global.provider) {
         global.provider = this.provider.currentProvider;
+      }
+      if (!global.orchestratorProvider) {
+        global.orchestratorProvider = this.orchestratorProvider.currentProvider;
       }
 
       console.log('✅ Web3Service initialized successfully');
@@ -87,11 +111,18 @@ class Web3Service {
       await this.provider.destroy();
       this.provider = null;
     }
+    if (this.orchestratorProvider) {
+      await this.orchestratorProvider.destroy();
+      this.orchestratorProvider = null;
+    }
     this.isInitialized = false;
 
-    // Clean up global reference
+    // Clean up global references
     if (global.provider === this.provider?.currentProvider) {
       global.provider = null;
+    }
+    if (global.orchestratorProvider === this.orchestratorProvider?.currentProvider) {
+      global.orchestratorProvider = null;
     }
   }
 
@@ -99,9 +130,16 @@ class Web3Service {
     return this.provider && this.provider.isConnected;
   }
 
+  get isOrchestratorConnected() {
+    return this.orchestratorProvider && this.orchestratorProvider.isConnected;
+  }
+
   async restart() {
     if (this.provider) {
       await this.provider.restart();
+    }
+    if (this.orchestratorProvider) {
+      await this.orchestratorProvider.restart();
     }
   }
 

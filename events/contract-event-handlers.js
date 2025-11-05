@@ -12,7 +12,7 @@ const {
   EXPLORER_CONFIG
 } = require('../config/web3-config');
 // Import provider and contract from config module
-const { escrowContract } = require('../config.js');
+const { escrowContract, protocolViewerContract } = require('../config.js');
 
 
 // Main event handler for contract events
@@ -65,6 +65,18 @@ const handleContractEvent = async (log) => {
 
       case 'DepositWithdrawn':
         await handleDepositWithdrawn(parsed, log);
+        break;
+
+      case 'FundsLocked':
+        await handleFundsLocked(parsed, log);
+        break;
+
+      case 'FundsUnlockedAndTransferred':
+        await handleFundsUnlockedAndTransferred(parsed, log);
+        break;
+
+      case 'DepositMinConversionRateUpdated':
+        await handleDepositMinConversionRateUpdated(parsed, log);
         break;
 
       default:
@@ -128,7 +140,7 @@ async function handleDepositCurrencyAdded(parsed, log) {
 
         // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
         try {
-          const depositData = await escrowContract.getDeposit(depositId);
+          const depositData = await protocolViewerContract.getDeposit(depositId);
 
           // Check for deposit data structure exactly like in search-deposit.js
           if (depositData && depositData.deposit && depositData.deposit.amount) {
@@ -230,7 +242,7 @@ async function handleDepositConversionRateUpdated(parsed, log) {
 
         // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
         try {
-          const depositData = await escrowContract.getDeposit(depositId);
+          const depositData = await protocolViewerContract.getDeposit(depositId);
 
           // Check for deposit data structure exactly like in search-deposit.js
           if (depositData && depositData.deposit && depositData.deposit.amount) {
@@ -479,6 +491,83 @@ async function handleIntentFulfilled(parsed, log) {
     console.log(`📝 IntentFulfilled collected for batching (fallback mode) - depositId: ${depositId}`);
   }
 }
+// Handle Orchestrator v2/v3 events (same structure as escrow events but different contract)
+const handleOrchestratorEvent = async (log) => {
+  try {
+    console.log('📡 Received orchestrator event:', log);
+
+    const parsed = iface.parseLog({
+      topics: log.topics,
+      data: log.data
+    });
+
+    if (!parsed) {
+      console.error('❌ Could not parse orchestrator event log:', log);
+      return;
+    }
+
+    const eventName = parsed.name;
+    console.log(`🎯 Processing orchestrator ${eventName} event`);
+
+    // Handle different event types - same as escrow but for orchestrator contract
+    switch (eventName) {
+      case 'IntentSignaled':
+        await handleIntentSignaled(parsed, log);
+        break;
+
+      case 'IntentFulfilled':
+        await handleIntentFulfilled(parsed, log);
+        break;
+
+      case 'IntentPruned':
+        await handleIntentPruned(parsed, log);
+        break;
+
+      case 'DepositReceived':
+        await handleDepositReceived(parsed, log);
+        break;
+
+      case 'DepositVerifierAdded':
+        await handleDepositVerifierAdded(parsed, log);
+        break;
+
+      case 'DepositCurrencyAdded':
+        await handleDepositCurrencyAdded(parsed, log);
+        break;
+
+      case 'DepositConversionRateUpdated':
+        await handleDepositConversionRateUpdated(parsed, log);
+        break;
+
+      case 'DepositWithdrawn':
+        await handleDepositWithdrawn(parsed, log);
+        break;
+
+      default:
+        console.log(`ℹ️ Unhandled orchestrator event type: ${eventName}`);
+    }
+    switch (eventName) {
+      case 'IntentSignaled':
+        await handleIntentSignaled(parsed, log);
+        break;
+
+      case 'IntentFulfilled':
+        await handleIntentFulfilled(parsed, log);
+        break;
+
+      case 'IntentPruned':
+        await handleIntentPruned(parsed, log);
+        break;
+
+      default:
+        console.log(`ℹ️ Unhandled orchestrator event type: ${eventName}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error handling orchestrator event:', error);
+    console.error('Error details:', error.stack);
+  }
+};
 
 async function handleIntentPruned(parsed, log) {
   const { intentHash, depositId } = parsed.args;
@@ -601,6 +690,176 @@ async function handleIntentPruned(parsed, log) {
   }
 }
 
+async function handleDepositWithdrawn(parsed, log) {
+  const { depositId, amount } = parsed.args;
+
+  console.log(`💸 Deposit withdrawn: ${depositId} (${Utils.convertFromMicrounits(amount.toString())} USDC)`);
+}
+
+async function handleFundsLocked(parsed, log) {
+  const { depositId, amount } = parsed.args;
+
+  console.log(`🔒 Funds locked: ${depositId} (${Utils.convertFromMicrounits(amount.toString())} USDC)`);
+
+  // This is equivalent to deposit received - save deposit data for sniper processing
+  Web3State.setDepositState(depositId.toString(), {
+    depositAmount: amount.toString(),
+    verifierAddress: '0x0000000000000000000000000000000000000000' // Default verifier
+  });
+}
+
+async function handleFundsUnlockedAndTransferred(parsed, log) {
+  const { depositId, amount, to } = parsed.args;
+
+  console.log(`🔓 Funds unlocked and transferred: ${depositId} (${Utils.convertFromMicrounits(amount.toString())} USDC) to ${to}`);
+
+  // This is similar to intent fulfilled - trigger notifications
+  const intentForNotification = {
+    intentHash: `transfer-${depositId}-${log.transactionHash.slice(-8)}`, // Generate a hash-like identifier
+    depositId: Number(depositId),
+    paymentVerifier: '0x0000000000000000000000000000000000000000', // Default verifier
+    owner: to, // The recipient is now the "owner"
+    to: to,
+    amount: amount.toString(),
+    fiatCurrency: '0x0000000000000000000000000000000000000000000000000000000000000000', // Default USD
+    conversionRate: '1000000000000000000', // 1:1 for now
+    sustainabilityFee: '0',
+    verifierFee: '0',
+    timestamp: Math.floor(Date.now() / 1000)
+  };
+
+async function handleFundsUnlockedAndTransferred(parsed, log) {
+  const { depositId, amount, to } = parsed.args;
+
+  console.log(`🔓 Funds unlocked and transferred: ${depositId} (${Utils.convertFromMicrounits(amount.toString())} USDC) to ${to}`);
+
+  // This is similar to intent fulfilled - trigger notifications
+  const intentForNotification = {
+    intentHash: `transfer-${depositId}-${log.transactionHash.slice(-8)}`, // Generate a hash-like identifier
+    depositId: Number(depositId),
+    paymentVerifier: '0x0000000000000000000000000000000000000000', // Default verifier
+    owner: to, // The recipient is now the "owner"
+    to: to,
+    amount: amount.toString(),
+    fiatCurrency: '0x0000000000000000000000000000000000000000000000000000000000000000', // Default USD
+    conversionRate: '1000000000000000000', // 1:1 for now
+    sustainabilityFee: '0',
+    verifierFee: '0',
+    timestamp: Math.floor(Date.now() / 1000)
+  };
+
+  // Send fulfilled notification
+  const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
+  await sendFulfilledNotification(intentForNotification, log.transactionHash.toLowerCase());
+  console.log(`✅ Sent transfer notification for deposit ${depositId}`);
+}
+
+async function handleDepositMinConversionRateUpdated(parsed, log) {
+  // Handle BigInt values properly from parsed event
+  const depositId = BigInt(parsed.args[0]).toString();
+  const paymentMethod = parsed.args[1];
+  const currency = parsed.args[2];
+  const minConversionRate = BigInt(parsed.args[3]).toString();
+
+  // Validate parsed event arguments
+  if (!paymentMethod || typeof paymentMethod !== 'string') {
+    console.error(`❌ Invalid paymentMethod in DepositMinConversionRateUpdated event:`, paymentMethod);
+    return;
+  }
+
+  console.log(`📊 DepositMinConversionRateUpdated: ID=${depositId}, PaymentMethod=${paymentMethod}, Currency=${currency}, MinRate=${minConversionRate}`);
+
+  // ✅ RETRIEVE STORED DEPOSIT DATA FROM GLOBAL STATE FIRST
+  let web3StateData = Web3State.getDepositStateById(depositId.toString());
+  let depositAmount = web3StateData?.depositAmount || null;
+
+  // If no Web3State data, try contract and database fallback
+  if (!web3StateData || !depositAmount) {
+    let fallbackAmount = null;
+
+    // Try to get deposit amount from database first
+    try {
+      const dbManager = new DatabaseManager();
+      const dbAmount = await dbManager.getDepositAmount(depositId);
+      if (dbAmount && dbAmount > 0) {
+        fallbackAmount = dbAmount.toString();
+        console.log(`📊 Using database amount: ${Utils.convertFromMicrounits(fallbackAmount)} USDC`);
+      }
+    } catch (dbError) {
+      console.error(`❌ Database error:`, dbError.message);
+    }
+
+    // Try to get deposit amount from contract using the correct method from search-deposit.js
+    try {
+      if (escrowContract) {
+        // Method 1: Use the bytes32 format for deposits mapping (primary method)
+        try {
+          const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(BigInt(depositId)), 32);
+          const deposit = await escrowContract.deposits(depositIdBytes32);
+          if (deposit && deposit.depositor && deposit.depositor !== ethers.ZeroAddress) {
+            // Found deposit in mapping, now get detailed data
+          }
+        } catch (depositsError) {
+          console.warn(`⚠️ Mapping check failed: ${depositsError.message}`);
+        }
+
+        // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
+        try {
+          const depositData = await protocolViewerContract.getDeposit(depositId);
+
+          // Check for deposit data structure exactly like in search-deposit.js
+          if (depositData && depositData.deposit && depositData.deposit.amount) {
+            const contractAmount = BigInt(depositData.deposit.amount).toString();
+            fallbackAmount = contractAmount;
+            console.log(`✅ Retrieved from contract: ${Utils.convertFromMicrounits(contractAmount)} USDC`);
+
+            // Cache in Web3State for future use
+            try {
+              // Validate paymentMethod before caching
+              const paymentMethodLower = typeof paymentMethod === 'string' ? paymentMethod.toLowerCase() : '0x0000000000000000000000000000000000000000';
+              Web3State.setDepositState(depositId.toString(), {
+                depositAmount: contractAmount,
+                verifierAddress: paymentMethodLower
+              });
+            } catch (cacheError) {
+              console.error(`❌ Caching error:`, cacheError.message);
+            }
+          }
+        } catch (getDepositError) {
+          console.warn(`⚠️ getDeposit failed: ${getDepositError.message}`);
+        }
+      }
+    } catch (contractError) {
+      console.error(`❌ Contract error:`, contractError.message);
+    }
+
+    // If still no amount, use default fallback
+    if (!fallbackAmount) {
+      fallbackAmount = '1000000'; // Default fallback: 1 USDC
+      console.log(`⚠️ Using default fallback: 1.00 USDC`);
+    }
+
+    depositAmount = fallbackAmount;
+  }
+
+  // Only check sniper opportunities for non-zero currencies
+  if (!isZeroAddress(currency)) {
+    console.log(`📊 Processing sniper opportunity for deposit ${depositId}`);
+
+    await checkSniperOpportunity(
+      depositId,
+      depositAmount,    // ✅ REAL deposit amount from Web3State/contract/database
+      currency,         // ✅ Currency hash
+      minConversionRate, // ✅ Updated minimum conversion rate (equivalent to conversionRate)
+      paymentMethod     // ✅ Payment method (equivalent to verifier)
+    );
+  }
+}
+  // Send fulfilled notification
+  const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
+  await sendFulfilledNotification(intentForNotification, log.transactionHash.toLowerCase());
+  console.log(`✅ Sent transfer notification for deposit ${depositId}`);
+}
 async function handleDepositWithdrawn(parsed, log) {
   try {
     const { depositId, depositor, amount } = parsed.args;

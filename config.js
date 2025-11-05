@@ -12,11 +12,23 @@ const supabase = createClient(
 // Initialize ethers provider
 const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC);
 
-// Load Escrow contract ABI
-const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
+// Load Escrow contract ABI (V3)
+const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/Escrow.json', 'utf8')).abi;
 
-// Initialize escrow contract
-const escrowContract = new ethers.Contract('0xca38607d85e8f6294dc10728669605e6664c2d70', ESCROW_ABI, provider);
+// Load Orchestrator contract ABI (V3 - different ABI structure)
+const ORCHESTRATOR_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
+
+// Load ProtocolViewer contract ABI (V3 - for deposit/intent queries)
+const PROTOCOL_VIEWER_ABI = JSON.parse(fs.readFileSync(__dirname + '/ProtocolViewer.json', 'utf8')).abi;
+
+// Initialize escrow contract (V3)
+const escrowContract = new ethers.Contract('0x2f121CDDCA6d652f35e8B3E560f9760898888888', ESCROW_ABI, provider);
+
+// Initialize orchestrator contract (V3)
+const orchestratorContract = new ethers.Contract('0x88888883Ed048FF0a415271B28b2F52d431810D0', ORCHESTRATOR_ABI, provider);
+
+// Initialize protocol viewer contract (V3 - for proper deposit/intent queries)
+const protocolViewerContract = new ethers.Contract('0x30B03De22328074Fbe8447C425ae988797146606', PROTOCOL_VIEWER_ABI, provider);
 
 // Exchange rate API configuration
 const EXCHANGE_API_URL = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}/latest/USD`;
@@ -26,29 +38,34 @@ const FALLBACK_EXCHANGE_API_URL = 'https://api.frankfurter.app/latest?from=USD';
 const depositAmounts = new Map(); // Store deposit amounts temporarily
 const intentDetails = new Map();
 
-// Currency and platform mappings
-const verifierMapping = {
-  '0x8b5d4e8768d7b05e8f2a8e4b7b8b2d7e8c8d7a6b5c4e3f2a1b9c8d7e6f5a4': 'revolut',
-  '0x7a6b5c4e3f2a1b9c8d7e6f5a4b3c2d1e9f8a7b6c5d4e3f2a1b9c8d7e6f5a4': 'wise',
-  '0x6b5c4e3f2a1b9c8d7e6f5a4b3c2d1e9f8a7b6c5d4e3f2a1b9c8d7e6f5a4b3': 'paypal',
-  '0x5c4e3f2a1b9c8d7e6f5a4b3c2d1e9f8a7b6c5d4e3f2a1b9c8d7e6f5a4b3c2': 'venmo',
-  '0x4e3f2a1b9c8d7e6f5a4b3c2d1e9f8a7b6c5d4e3f2a1b9c8d7e6f5a4b3c2d1': 'zelle',
-  '0x3f2a1b9c8d7e6f5a4b3c2d1e9f8a7b6c5d4e3f2a1b9c8d7e6f5a4b3c2d1e9': 'ach',
+// Unified platform mapping for V3 (payment method hashes from idea.txt)
+// All payment methods resolve to UnifiedPaymentVerifier at 0x16b3e4a3CA36D3A4bCA281767f15C7ADeF4ab163
+const platformMapping = {
+  // Payment method hashes (Orchestrator V3) - 66 chars
+  '0x90262a3db0edd0be2369c6b28f9e8511ec0bac7136cefbada0880602f87e7268': { platform: 'venmo', isUsdOnly: true },
+  '0x617f88ab82b5c1b014c539f7e75121427f0bb50a4c58b187a238531e7d58605d': { platform: 'revolut', isUsdOnly: false },
+  '0x10940ee67cfb3c6c064569ec92c0ee934cd7afa18dd2ca2d6a2254fcb009c17d': { platform: 'cashapp', isUsdOnly: true },
+  '0x554a007c2217df766b977723b276671aee5ebb4adaea0edb6433c88b3e61dac5': { platform: 'wise', isUsdOnly: false },
+  '0xa5418819c024239299ea32e09defae8ec412c03e58f5c75f1b2fe84c857f5483': { platform: 'mercado pago', isUsdOnly: false },
+  '0x817260692b75e93c7fbc51c71637d4075a975e221e1ebc1abeddfabd731fd90d': { platform: 'zelle', isUsdOnly: true },
+  '0x6aa1d1401e79ad0549dced8b1b96fb72c41cd02b32a7d9ea1fed54ba9e17152e': { platform: 'zelle', isUsdOnly: true },
+  '0x4bc42b322a3ad413b91b2fde30549ca70d6ee900eded1681de91aaf32ffd7ab5': { platform: 'zelle', isUsdOnly: true },
+  '0x3ccc3d4d5e769b1f82dc4988485551dc0cd3c7a3926d7d8a4dde91507199490f': { platform: 'paypal', isUsdOnly: false },
+  '0x62c7ed738ad3e7618111348af32691b5767777fbaf46a2d8943237625552645c': { platform: 'monzo', isUsdOnly: false }
 };
 
-// Enhanced platform mapping for user-friendly names
+// Enhanced platform mapping for user-friendly names (V3 payment method hashes)
 const platformNameMapping = {
-  '0x9a733B55a875D0DB4915c6B36350b24F8AB99dF5': '💳 Venmo',
-  '0xAA5A1B62B01781E789C900d616300717CD9A41aB': '🇪🇺 Revolut',
-  '0x76D33A33068D86016B806dF02376dDBb23Dd3703': '💵 Cash-App',
-  '0xFF0149799631D7A5bdE2e7eA9b306c42b3d9a9ca': '🌍 Wise',
-  '0xf2AC5be14F32Cbe6A613CFF8931d95460D6c33A3': '🇦🇷 Mercado-Pago',
-  '0xe9b654Ee19473E77B71c2C328A31E79252dF66D6': '🏦 Zelle-(Citi)',
-  '0x73640AEd9d3110c04BC7B13540648A5adb3EA579': '🏦 Zelle-(Bank of America)',
-  '0x1783f040783C0827fB64d128ECE548d9B3613Ad5': '🏦 Zelle',
-  '0x03d17E9371C858072E171276979f6B44571C5DeA': '💰 PayPal',
-  '0x0dE46433bD251027f73eD8f28E01eF05DA36a2E0': '🇬🇧 Monzo',
-  '0x431a078a5029146aab239c768a615cd484519af7': 'Zelle',
+  '0x90262a3db0edd0be2369c6b28f9e8511ec0bac7136cefbada0880602f87e7268': '💳 Venmo',
+  '0x617f88ab82b5c1b014c539f7e75121427f0bb50a4c58b187a238531e7d58605d': '🇪🇺 Revolut',
+  '0x10940ee67cfb3c6c064569ec92c0ee934cd7afa18dd2ca2d6a2254fcb009c17d': '💵 Cash-App',
+  '0x554a007c2217df766b977723b276671aee5ebb4adaea0edb6433c88b3e61dac5': '🌍 Wise',
+  '0xa5418819c024239299ea32e09defae8ec412c03e58f5c75f1b2fe84c857f5483': '🇦🇷 Mercado-Pago',
+  '0x817260692b75e93c7fbc51c71637d4075a975e221e1ebc1abeddfabd731fd90d': '🏦 Zelle-(Citi)',
+  '0x6aa1d1401e79ad0549dced8b1b96fb72c41cd02b32a7d9ea1fed54ba9e17152e': '🏦 Zelle-(Chase)',
+  '0x4bc42b322a3ad413b91b2fde30549ca70d6ee900eded1681de91aaf32ffd7ab5': '🏦 Zelle-(BofA)',
+  '0x3ccc3d4d5e769b1f82dc4988485551dc0cd3c7a3926d7d8a4dde91507199490f': '💰 PayPal',
+  '0x62c7ed738ad3e7618111348af32691b5767777fbaf46a2d8943237625552645c': '🇬🇧 Monzo',
   // Additional mappings can be added here
 };
 
@@ -110,8 +127,22 @@ const currencyNameMapping = {
   // Additional mappings can be added here
 };
 
-const getPlatformName = (verifierAddress) => {
-  return verifierMapping[verifierAddress] || 'Unknown Platform';
+// Unified platform name lookup - works with both verifier addresses and payment method hashes
+const getPlatformName = (identifier) => {
+  const mapping = platformMapping[identifier.toLowerCase()];
+  if (mapping) {
+    // Normalize zelle variants to just "zelle" for display
+    return mapping.platform.startsWith('zelle') ? 'zelle' : mapping.platform;
+  }
+  // Show truncated identifier for unknown platforms
+  const identifierStr = identifier.toLowerCase();
+  if (identifierStr.length === 42) {
+    // Address format (40 chars + 0x)
+    return `Unknown (${identifierStr.slice(0, 6)}...${identifierStr.slice(-4)})`;
+  } else {
+    // Hash format (64 chars + 0x)
+    return `Unknown (${identifierStr.slice(0, 8)}...${identifierStr.slice(-6)})`;
+  }
 };
 
 const currencyHashToCode = {
@@ -168,11 +199,13 @@ module.exports = {
   supabase,
   provider,
   escrowContract,
+  orchestratorContract,
+  protocolViewerContract,
   EXCHANGE_API_URL,
   FALLBACK_EXCHANGE_API_URL,
   depositAmounts,
   intentDetails,
-  verifierMapping,
+  platformMapping,
   platformNameMapping,
   currencyNameMapping,
   getPlatformName,

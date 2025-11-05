@@ -1,15 +1,24 @@
 const DatabaseManager = require('../scripts/database-manager');
 const { getExchangeRates } = require('../scripts/exchange-service');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
-const { escrowContract } = require('../config');
+const { protocolViewerContract } = require('../config');
 const {
   currencyHashToCode,
   EXPLORER_CONFIG,
   getPlatformName,
   currencyNameMapping,
-  platformNameMapping,
-  normalizedPlatformMapping
-} = require('../config/web3-config');
+  platformMapping
+} = require('../config');
+
+// Create normalized platform mapping for backward compatibility
+const normalizedPlatformMapping = {};
+const platformNameMapping = {};
+for (const [key, value] of Object.entries(platformMapping)) {
+  if (key.length === 42) { // 40 chars + 0x = address format
+    platformNameMapping[key] = value.platform;
+  }
+  normalizedPlatformMapping[key] = value.platform;
+}
 
 /**
  * Sniper Service Module
@@ -41,14 +50,22 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
     // If still no amount from database, try contract
     if (!depositAmount || depositAmount <= 0) {
       try {
-        if (escrowContract) {
-          // Method 1: Use the bytes32 format for deposits mapping (primary method) - EXACTLY like search-deposit.js
+        if (orchestratorContract) {
+          // V3 Architecture: Use orchestratorContract for deposit operations
           try {
             const { ethers } = require('ethers');
             const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(BigInt(depositId)), 32);
 
-            // First check if deposit exists in the deposits mapping
-            const deposit = await escrowContract.deposits(depositIdBytes32);
+            // V3 Architecture: Use orchestratorContract for deposit operations
+            // In V3, deposits are handled by the orchestrator, so try to get deposit from orchestrator
+            let depositExists = false;
+            try {
+              await protocolViewerContract.getDeposit(depositId);
+              depositExists = true;
+            } catch (error) {
+              // Deposit doesn't exist in V3
+              depositExists = false;
+            }
             if (deposit && deposit.depositor && deposit.depositor !== ethers.ZeroAddress) {
               // Found deposit in mapping, now get detailed data
             }
@@ -58,7 +75,8 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
 
           // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
           try {
-            const depositData = await escrowContract.getDeposit(depositId);
+            // V3 Architecture: Use orchestratorContract for deposit operations
+            const depositData = await protocolViewerContract.getDeposit(depositId);
 
             // Check for deposit data structure exactly like in search-deposit.js
             if (depositData && depositData.deposit && depositData.deposit.amount) {

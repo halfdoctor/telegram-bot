@@ -47,10 +47,11 @@ app.listen(PORT, () => {
 });
 
 // Import provider and contract from config module
-const { provider, escrowContract } = require('./config.js');
+const { provider, escrowContract, orchestratorContract } = require('./config.js');
 
 const depositAmounts = new Map(); // Store deposit amounts temporarily
 const intentDetails = new Map();
+const orchestratorIntentDetails = new Map(); // intentHash -> {depositId, escrow, paymentMethod, owner, to, amount, fiatCurrency, conversionRate, timestamp}
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
@@ -419,7 +420,8 @@ bot.onText(/\/status/, async (msg) => {
     const snipers = await db.getUserSnipers(chatId);
 
     let message = `🔧 *System Status:*\n\n`;
-    message += `• *WebSocket:* ${wsStatus}\n`;
+    message += `• *Escrow WebSocket:* ${wsStatus}\n`;
+    message += `• *Orchestrator WebSocket:* ${orchestratorStatus}\n`;
     message += `• *Database:* ${dbStatus}\n`;
     message += `• *Telegram:* ${botStatus}\n\n`;
     message += `📊 *Your Settings:*\n`;
@@ -455,8 +457,11 @@ bot.onText(/\/status/, async (msg) => {
     message += `\n💾 *Memory:* ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)}MB\n`;
 
     // Add reconnection info if disconnected
-    if (!wsConnected && web3Service) {
-      message += `\n⚠️ *WebSocket:* Disconnected`;
+    if ((!escrowConnected || !orchestratorConnected) && web3Service) {
+      message += `\n⚠️ *WebSocket Connections:* `;
+      if (!escrowConnected) message += `Escrow disconnected `;
+      if (!orchestratorConnected) message += `Orchestrator disconnected`;
+      message += `\n`;
     }
 
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -1845,6 +1850,16 @@ console.log('🔍 Listening for contract events...');
 // Improved graceful shutdown with proper cleanup
 const gracefulShutdown = async (signal) => {
   console.log(`🔄 Received ${signal}, shutting down gracefully...`);
+
+  // Clean up web3 service providers
+  if (web3Service) {
+    try {
+      await web3Service.destroy();
+      console.log('✅ Web3Service cleaned up successfully');
+    } catch (error) {
+      console.error('❌ Error cleaning up Web3Service:', error);
+    }
+  }
 
   try {
     // Stop accepting new connections

@@ -2,11 +2,22 @@ require('dotenv').config({ path: __dirname + '/../.env' });
 const { ethers } = require('ethers');
 const fs = require('fs');
 
-// Load Escrow contract ABI
-const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../abi.js', 'utf8'));
+// Load Escrow contract ABI (V3)
+const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../Escrow.json', 'utf8')).abi;
 
 // Import provider and contract from config module
-const { provider, escrowContract, currencyHashToCode, verifierMapping, getPlatformName, platformNameMapping, currencyNameMapping } = require('../config.js');
+const { protocolViewerContract, currencyHashToCode, platformMapping, getPlatformName, platformNameMapping, currencyNameMapping } = require('../config.js');
+
+// V3 Architecture: Deposits are now handled by Orchestrator contract
+// Use orchestratorContract for deposit/intent operations
+
+// Legacy verifierMapping for backward compatibility
+const verifierMapping = {};
+for (const [key, value] of Object.entries(platformMapping)) {
+  if (key.length === 42) { // 40 chars + 0x = address format
+    verifierMapping[key] = value.platform;
+  }
+}
 
 // Import exchange service for market rate comparisons
 const { getCurrencyRate } = require('./exchange-service.js');
@@ -45,18 +56,21 @@ const getTokenName = (tokenAddress) => {
 async function searchDeposit(depositId) {
 
     try {
-        // Convert deposit ID to bytes32 format
-        const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(depositId), 32);
-
-        // Get deposit details
-        const deposit = await escrowContract.deposits(depositIdBytes32);
-
-        if (!deposit.depositor || deposit.depositor === ethers.ZeroAddress) {
-            return { error: `No deposit found with ID: ${depositId}` };
+        // V3 Architecture: Use protocolViewerContract for comprehensive deposit queries
+        // For V3, use ProtocolViewer contract to get deposit data with all related information
+        let depositData;
+        try {
+            // Use ProtocolViewer for proper V3 deposit data retrieval
+            depositData = await protocolViewerContract.getDeposit(depositId);
+        } catch (error) {
+            // If deposit doesn't exist in V3, this will throw
+            return { error: `No deposit found with ID: ${depositId} (V3 contract may not have deposits from V2)` };
         }
 
-        // Get deposit with all related data using getDeposit method
-        const depositData = await escrowContract.getDeposit(depositId);
+        // V3 ProtocolViewer returns structured data, check if we have valid deposit data
+        if (!depositData || !depositData.deposit) {
+            return { error: `No deposit found with ID: ${depositId}` };
+        }
 
         // Helper function to convert currency hash to code
         const getCurrencyCode = (hash) => {
@@ -88,12 +102,13 @@ async function searchDeposit(depositId) {
         // Helper function to fetch detailed intent data
         const getIntentDetails = async (intentHash) => {
           try {
-            const intentView = await escrowContract.getIntent(intentHash);
+            // V3 Architecture: Use protocolViewerContract for comprehensive intent data
+            const intentView = await protocolViewerContract.getIntent(intentHash);
 
             return {
               intentHash: intentHash, // Use the original hash parameter
               amount: formatAmount(intentView.intent.amount, 6), // USDC has 6 decimals
-              verifier: getEnhancedPlatformName(intentView.intent.paymentVerifier),
+              verifier: getEnhancedPlatformName(intentView.intent.paymentMethod),
               currencyCode: getCurrencyCode(intentView.intent.fiatCurrency),
               exchangeRate: formatAmount(intentView.intent.conversionRate, 18),
               timestamp: intentView.intent.timestamp,
@@ -118,22 +133,33 @@ async function searchDeposit(depositId) {
           return `${Math.floor(secondsSince / 86400)}d ago`;
         };
 
-        // Format verifiers with platform names and currency codes
-        const formattedVerifiers = depositData.verifiers.map(verifier => ({
-            platform: getEnhancedPlatformName(verifier.verifier),
-            address: formatAddress(verifier.verifier),
+        // Format payment methods with platform names and currency codes (V3 ProtocolViewer structure)
+        const formattedVerifiers = depositData.paymentMethods.map(paymentMethod => ({
+            platform: getEnhancedPlatformName(paymentMethod.paymentMethod),
+            address: formatAddress(paymentMethod.paymentMethod),
             verificationData: {
-                intentGatingService: formatAddress(verifier.verificationData.intentGatingService),
-                payeeDetails: verifier.verificationData.payeeDetails || 'N/A'
+                intentGatingService: formatAddress(paymentMethod.paymentMethod),
+                payeeDetails: (() => {
+                    try {
+                        // V3 stores payeeDetails as bytes32, but only decode if it's a valid null-terminated string
+                        if (paymentMethod.verificationData.payeeDetails && paymentMethod.verificationData.payeeDetails !== ethers.ZeroHash) {
+                            return ethers.decodeBytes32String(paymentMethod.verificationData.payeeDetails);
+                        }
+                        return 'N/A';
+                    } catch (error) {
+                        // If decoding fails, return the raw bytes32 value
+                        return paymentMethod.verificationData.payeeDetails ? paymentMethod.verificationData.payeeDetails.substring(0, 10) + '...' : 'N/A';
+                    }
+                })()
             },
-            currencies: verifier.currencies.map(currency => ({
+            currencies: paymentMethod.currencies.map(currency => ({
                 code: getCurrencyCode(currency.code),
-                conversionRate: formatAmount(currency.conversionRate, 18)
+                conversionRate: formatAmount(currency.minConversionRate, 18)
             }))
         }));
 
-        // Get associated intents
-        const intentHashes = depositData.deposit.intentHashes || [];
+        // Get associated intents (V3 structure)
+        const intentHashes = depositData.intentHashes || [];
 
         // Fetch detailed intent data for each intent hash
         const detailedIntents = [];
@@ -161,7 +187,7 @@ async function searchDeposit(depositId) {
             depositId: depositId,
             depositor: depositData.deposit.depositor,
             token: getTokenName(depositData.deposit.token),
-            amount: formatAmount(depositData.deposit.amount, 6), // USDC has 6 decimals
+            amount: formatAmount(depositData.deposit.remainingDeposits + depositData.deposit.outstandingIntentAmount, 6), // Total deposited = remaining + outstanding
             remainingAmount: formatAmount(depositData.deposit.remainingDeposits, 6),
             status: depositData.deposit.acceptingIntents ? '✅ Active' : '❌ Inactive',
             intents: detailedIntents, // Use detailed intents instead of just hashes
