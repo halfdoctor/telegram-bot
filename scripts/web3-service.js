@@ -74,7 +74,7 @@ class Web3Service {
 
     try {
       console.log(`📡 Creating escrow provider for contract: ${CONTRACT_ADDRESS}`);
-      // Initialize escrow provider (legacy)
+      // Initialize escrow provider (v3)
       this.provider = new ResilientWebSocketProvider(
         this.wsUrl,
         this.eventHandler,

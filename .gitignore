@@ -7,3 +7,4 @@ pnpm-lock.yaml
 error.log
 test/*
 cache/dune_cache.json
+contracts/*

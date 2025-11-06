@@ -55,20 +55,9 @@ const orchestratorIntentDetails = new Map(); // intentHash -> {depositId, escrow
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-// Initialize web3 service for blockchain interactions
+// Web3Service will be initialized through bot initialization
+// This prevents duplicate initialization and logging
 let web3Service;
-const initializeWeb3Service = async () => {
-  try {
-    web3Service = getWeb3Service(process.env.BASE_WS_URL || 'wss://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY');
-    await web3Service.initialize();
-    console.log('✅ Web3Service initialized successfully');
-  } catch (error) {
-    console.error('❌ Failed to initialize Web3Service:', error);
-  }
-};
-
-// Initialize web3 service asynchronously
-initializeWeb3Service();
 
 // Make bot and provider available globally for web3-service notifications
 global.bot = bot;
@@ -117,6 +106,17 @@ const initializeBot = async () => {
       console.log('✅ Database connection successful');
     } catch (error) {
       console.error('❌ Database connection failed:', error.message);
+      throw error;
+    }
+
+    // Initialize Web3Service in the proper sequence
+    try {
+      console.log('🔧 Initializing Web3Service...');
+      web3Service = getWeb3Service(process.env.BASE_WS_URL || 'wss://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY');
+      await web3Service.initialize();
+      console.log('✅ Web3Service initialized successfully');
+    } catch (error) {
+      console.error('❌ Failed to initialize Web3Service:', error);
       throw error;
     }
     
@@ -1551,15 +1551,7 @@ const createDepositKeyboard = (depositId) => {
   };
 };
 
-// Update the existing help command to redirect to menu
-bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-  
-  bot.sendMessage(chatId, '❓ **Need Help?**\n\nUse the interactive menu below for easy navigation, or type `/menu` anytime to access it.', {
-    parse_mode: 'Markdown',
-    reply_markup: createMainMenu()
-  });
-});
+// Help command is handled below in the more comprehensive implementation
 
 // Add persistent menu command
 bot.onText(/\/quickmenu/, (msg) => {

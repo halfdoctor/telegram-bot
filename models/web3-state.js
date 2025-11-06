@@ -4,7 +4,7 @@
  */
 
 // Global deposit state tracking for sniper processing
-// depositId -> {depositAmount, verifierAddress}
+// depositId -> {depositAmount, depositorAddress, tokenAddress, intentAmountRange, delegateAddress, intentGuardianAddress}
 const depositState = new Map();
 
 // Transaction processing state

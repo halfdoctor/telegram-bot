@@ -13,13 +13,13 @@ const supabase = createClient(
 const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC);
 
 // Load Escrow contract ABI (V3)
-const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/Escrow.json', 'utf8')).abi;
+const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/deployments/Escrow.json', 'utf8')).abi;
 
-// Load Orchestrator contract ABI (V3 - different ABI structure)
-const ORCHESTRATOR_ABI = JSON.parse(fs.readFileSync(__dirname + '/abi.js', 'utf8'));
+// Load Orchestrator contract ABI (V3 - from deployments)
+const ORCHESTRATOR_ABI = JSON.parse(fs.readFileSync(__dirname + '/deployments/Orchestrator.json', 'utf8')).abi;
 
 // Load ProtocolViewer contract ABI (V3 - for deposit/intent queries)
-const PROTOCOL_VIEWER_ABI = JSON.parse(fs.readFileSync(__dirname + '/ProtocolViewer.json', 'utf8')).abi;
+const PROTOCOL_VIEWER_ABI = JSON.parse(fs.readFileSync(__dirname + '/deployments/ProtocolViewer.json', 'utf8')).abi;
 
 // Initialize escrow contract (V3)
 const escrowContract = new ethers.Contract('0x2f121CDDCA6d652f35e8B3E560f9760898888888', ESCROW_ABI, provider);
@@ -201,6 +201,9 @@ module.exports = {
   escrowContract,
   orchestratorContract,
   protocolViewerContract,
+  ESCROW_ABI,
+  ORCHESTRATOR_ABI,
+  PROTOCOL_VIEWER_ABI,
   EXCHANGE_API_URL,
   FALLBACK_EXCHANGE_API_URL,
   depositAmounts,

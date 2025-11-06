@@ -3,7 +3,7 @@ const { ethers } = require('ethers');
 const fs = require('fs');
 
 // Load Escrow contract ABI (V3)
-const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../Escrow.json', 'utf8')).abi;
+const ESCROW_ABI = JSON.parse(fs.readFileSync(__dirname + '/../deployments/Escrow.json', 'utf8')).abi;
 
 // Import provider and contract from config module
 const { protocolViewerContract, currencyHashToCode, platformMapping, getPlatformName, platformNameMapping, currencyNameMapping } = require('../config.js');
@@ -11,7 +11,7 @@ const { protocolViewerContract, currencyHashToCode, platformMapping, getPlatform
 // V3 Architecture: Deposits are now handled by Orchestrator contract
 // Use orchestratorContract for deposit/intent operations
 
-// Legacy verifierMapping for backward compatibility
+// v3 verifierMapping for backward compatibility
 const verifierMapping = {};
 for (const [key, value] of Object.entries(platformMapping)) {
   if (key.length === 42) { // 40 chars + 0x = address format
@@ -222,7 +222,7 @@ async function formatTelegramMessage(result) {
     result.intents.forEach((intent, index) => {
       // Handle both detailed intent objects and simple hash strings
       if (typeof intent === 'string') {
-        // Legacy format - just the hash
+        // v3 format - just the hash
         message += `• Intent ${index + 1}: ${intent}\n`;
       } else if (intent && typeof intent === 'object') {
         // New detailed format - check if we have intentHash or use index

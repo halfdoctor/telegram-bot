@@ -53,8 +53,8 @@ for (const [address, platform] of Object.entries(platformNameMapping)) {
   normalizedPlatformMapping[address.toLowerCase()] = platform;
 }
 
-// Load contract ABI from Escrow.json for escrow contract events
-const contractABI = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'Escrow.json'), 'utf8')).abi;
+// Load contract ABI from deployments/Escrow.json for escrow contract events
+const contractABI = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'deployments', 'Escrow.json'), 'utf8')).abi;
 
 // Create interface for parsing logs
 const iface = new Interface(contractABI);

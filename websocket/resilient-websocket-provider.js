@@ -9,23 +9,25 @@ const {
  * Enhanced WebSocket Provider with better connection stability
  */
 class ResilientWebSocketProvider {
-  constructor(url, eventHandler) {
-    this.url = url;
-    this.contractAddress = CONTRACT_ADDRESS;
-    this.eventHandler = eventHandler;
-    this.reconnectDelay = CONNECTION_CONFIG.RECONNECT_DELAY_MS;
-    this.maxReconnectDelay = CONNECTION_CONFIG.MAX_RECONNECT_DELAY_MS;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS;
-    this.isConnecting = false;
-    this.isDestroyed = false;
-    this.provider = null;
-    this.reconnectTimer = null;
-    this.keepAliveTimer = null;
-    this.lastActivityTime = Date.now();
+   constructor(url, eventHandler, contractAddress) {
+      this.url = url;
+      this.contractAddress = contractAddress || CONTRACT_ADDRESS;
+      this.eventHandler = eventHandler;
+      this.reconnectDelay = CONNECTION_CONFIG.RECONNECT_DELAY_MS;
+      this.maxReconnectDelay = CONNECTION_CONFIG.MAX_RECONNECT_DELAY_MS;
+      this.reconnectAttempts = 0;
+      this.maxReconnectAttempts = CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS;
+      this.isConnecting = false;
+      this.isDestroyed = false;
+      this.provider = null;
+      this.reconnectTimer = null;
+      this.keepAliveTimer = null;
+      this.lastActivityTime = Date.now();
 
-    this.connect();
-  }
+      // Note: Connection will be established via connect() method, not in constructor
+      // to avoid duplicate initialization logs
+      this.connect(); //comment to exclude auto connect on instantiation
+    }
 
   async connect() {
     if (this.isConnecting || this.isDestroyed) return;
@@ -243,7 +245,7 @@ class ResilientWebSocketProvider {
         this.eventHandler(log);
       });
 
-      console.log(`👂 Listening for events on contract: ${CONTRACT_ADDRESS}`);
+      console.log(`👂 Listening for events on contract: ${this.contractAddress}`);
     } catch (error) {
       console.error('❌ Failed to set up contract listening:', error.message);
       if (!this.isDestroyed) {
