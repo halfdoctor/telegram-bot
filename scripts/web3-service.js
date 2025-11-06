@@ -52,16 +52,13 @@ const {
 global.depositState = Web3State.getDepositState();
 global.pendingTransactions = Web3State.getPendingTransactions();
 
-// Import orchestrator event handler
-const { handleOrchestratorEvent } = require('../events/contract-event-handlers');
-
 // Web3Service class to manage all blockchain interactions
 class Web3Service {
   constructor(wsUrl, eventHandler, orchestratorWsUrl, orchestratorEventHandler) {
     this.wsUrl = wsUrl || process.env.BASE_WS_URL;
     this.eventHandler = eventHandler || handleContractEvent;
     this.orchestratorWsUrl = orchestratorWsUrl || process.env.BASE_WS_URL; // Use same WS URL for now
-    this.orchestratorEventHandler = orchestratorEventHandler || handleOrchestratorEvent;
+    this.orchestratorEventHandler = orchestratorEventHandler || handleContractEvent; // Use unified handler
     this.provider = null;
     this.orchestratorProvider = null;
     this.isInitialized = false;

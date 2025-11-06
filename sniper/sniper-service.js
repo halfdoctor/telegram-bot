@@ -1,7 +1,7 @@
 const DatabaseManager = require('../scripts/database-manager');
 const { getExchangeRates } = require('../scripts/exchange-service');
 const { Utils, isZeroAddress } = require('../utils/web3-utils');
-const { protocolViewerContract } = require('../config');
+const { protocolViewerContract, escrowContract, orchestratorContract } = require('../config');
 const {
   currencyHashToCode,
   EXPLORER_CONFIG,
@@ -86,8 +86,7 @@ async function checkSniperOpportunity(depositId, depositAmount, currencyHash, co
 
               // Cache in Web3State for future use
               try {
-                const { Web3State } = require('../models/web3-state');
-                Web3State.setDepositState(depositId.toString(), {
+                global.Web3State.setDepositState(depositId.toString(), {
                   depositAmount: contractAmount,
                   verifierAddress: verifierAddress || '0x0000000000000000000000000000000000000000'
                 });

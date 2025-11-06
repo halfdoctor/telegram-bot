@@ -17,7 +17,17 @@ const { escrowContract, protocolViewerContract, ORCHESTRATOR_ABI } = require('..
 // Direct ABI loading to ensure we have the correct one
 const fs = require('fs');
 const path = require('path');
-const ORCHESTRATOR_ABI_FALLBACK = JSON.parse(fs.readFileSync(path.join(__dirname, '../deployments/Orchestrator.json'), 'utf8')).abi;
+
+// Try to load the corrected ABI first, then fall back to the original
+let ORCHESTRATOR_ABI_FALLBACK;
+try {
+  ORCHESTRATOR_ABI_FALLBACK = JSON.parse(fs.readFileSync(path.join(__dirname, '../deployments/Orchestrator-corrected.json'), 'utf8')).abi;
+  console.log('✅ Using corrected Orchestrator ABI');
+} catch (error) {
+  console.log('⚠️ Corrected ABI not found, using original ABI');
+  ORCHESTRATOR_ABI_FALLBACK = JSON.parse(fs.readFileSync(path.join(__dirname, '../deployments/Orchestrator.json'), 'utf8')).abi;
+}
+
 const ORCHESTRATOR_ABI_FINAL = ORCHESTRATOR_ABI || ORCHESTRATOR_ABI_FALLBACK;
 
 // Main event handler for contract events
@@ -31,19 +41,25 @@ const handleContractEvent = async (log) => {
     let isEscrowContract = false;
     let isOrchestratorContract = false;
 
+    console.log(`🔍 Contract address: ${contractAddress} (original: ${log.address})`);
+
+    // Known contract addresses (normalize to lowercase for comparison)
+    const ESCROW_ADDRESS = '0x2f121cddca6d652f35e8b3e560f9760898888888';
+    const ORCHESTRATOR_ADDRESS = '0x88888883ed048ff0a415271b28b2f52d431810d0';
+
     // Check if this is the escrow contract (case-insensitive comparison)
-    if (contractAddress === '0x2f121cddca6d652f35e8b3e560f9760898888888') {
+    if (contractAddress === ESCROW_ADDRESS) {
       contractIface = iface;
       isEscrowContract = true;
       console.log('🏦 Processing escrow contract event');
-    } else if (contractAddress === '0x88888883ed048ff0a415271b28b2f52d431810d0') {
+    } else if (contractAddress === ORCHESTRATOR_ADDRESS) {
       // Orchestrator contract address (case-insensitive)
       contractIface = new ethers.Interface(ORCHESTRATOR_ABI_FINAL);
       isOrchestratorContract = true;
       console.log('🏗️ Processing orchestrator contract event');
     } else {
       console.log(`🏗️ Processing unknown contract event at ${contractAddress}`);
-      // Try to parse with orchestrator interface first
+      // Try to parse with orchestrator interface first since we have more orchestrator events
       try {
         const orchestratorParsed = new ethers.Interface(ORCHESTRATOR_ABI_FINAL).parseLog({
           topics: log.topics,
@@ -67,9 +83,16 @@ const handleContractEvent = async (log) => {
           }
         } catch (e2) {
           console.error('❌ Could not parse event with any interface:', log);
+          console.error('Attempted interfaces: Orchestrator, Escrow');
+          console.error('Error details:', e2.message);
           return;
         }
       }
+    }
+
+    if (!contractIface) {
+      console.error('❌ No contract interface found for address:', log.address);
+      return;
     }
 
     let parsed;
@@ -78,8 +101,14 @@ const handleContractEvent = async (log) => {
         topics: log.topics,
         data: log.data
       });
+      console.log(`✅ Successfully parsed event: ${parsed.name}`);
     } catch (parseError) {
       console.error('❌ Failed to parse event:', parseError.message, 'Interface:', contractIface ? 'exists' : 'missing');
+      console.error('Full log data:', JSON.stringify({
+        address: log.address,
+        topics: log.topics,
+        data: log.data
+      }, null, 2));
       return;
     }
 
@@ -943,79 +972,103 @@ async function handleDepositMinConversionRateUpdated(parsed, log) {
 
   console.log(`📊 DepositMinConversionRateUpdated: ID=${depositId}, PaymentMethod=${paymentMethod}, Currency=${currency}, MinRate=${minConversionRate}`);
 
-  // ✅ RETRIEVE STORED DEPOSIT DATA FROM GLOBAL STATE FIRST
-  let web3StateData = Web3State.getDepositStateById(depositId.toString());
-  let depositAmount = web3StateData?.depositAmount || null;
+  // ✅ IMPROVED DEPOSIT AMOUNT RETRIEVAL LOGIC
+  let depositAmount = null;
+  let amountSource = 'unknown';
 
-  // If no Web3State data, try contract and database fallback
-  if (!web3StateData || !depositAmount) {
-    let fallbackAmount = null;
+  // Step 1: Check Web3State first (most reliable)
+  try {
+    const web3StateData = Web3State.getDepositStateById(depositId.toString());
+    if (web3StateData && web3StateData.depositAmount && parseInt(web3StateData.depositAmount) > 0) {
+      depositAmount = web3StateData.depositAmount.toString();
+      amountSource = 'Web3State';
+      console.log(`📊 Using Web3State amount: ${Utils.convertFromMicrounits(depositAmount)} USDC`);
+    }
+  } catch (web3Error) {
+    console.warn(`⚠️ Web3State error: ${web3Error.message}`);
+  }
 
-    // Try to get deposit amount from database first
+  // Step 2: Try database if Web3State failed
+  if (!depositAmount || parseInt(depositAmount) <= 0) {
     try {
       const dbManager = new DatabaseManager();
       const dbAmount = await dbManager.getDepositAmount(depositId);
-      if (dbAmount && dbAmount > 0) {
-        fallbackAmount = dbAmount.toString();
-        console.log(`📊 Using database amount: ${Utils.convertFromMicrounits(fallbackAmount)} USDC`);
+      if (dbAmount && parseInt(dbAmount) > 0) {
+        depositAmount = dbAmount.toString();
+        amountSource = 'Database';
+        console.log(`📊 Using database amount: ${Utils.convertFromMicrounits(depositAmount)} USDC`);
+        
+        // Cache in Web3State for future use
+        try {
+          const paymentMethodLower = paymentMethod.toLowerCase();
+          Web3State.setDepositState(depositId.toString(), {
+            depositAmount: depositAmount,
+            verifierAddress: paymentMethodLower
+          });
+          console.log(`✅ Cached deposit amount in Web3State: ${depositId}`);
+        } catch (cacheError) {
+          console.warn(`⚠️ Web3State caching error:`, cacheError.message);
+        }
       }
     } catch (dbError) {
-      console.error(`❌ Database error:`, dbError.message);
+      console.warn(`⚠️ Database error:`, dbError.message);
     }
+  }
 
-    // Try to get deposit amount from contract using the correct method from search-deposit.js
+  // Step 3: Try contract if database failed
+  if (!depositAmount || parseInt(depositAmount) <= 0) {
     try {
-      if (escrowContract) {
-        // Method 1: Use the bytes32 format for deposits mapping (primary method)
-        try {
-          // const depositIdBytes32 = ethers.zeroPadValue(ethers.toBeHex(BigInt(depositId)), 32);
-          // const deposit = await escrowContract.deposits(depositIdBytes32);
-          const deposit = await protocolViewerContract.getDeposit(depositId);
-          if (deposit && deposit.depositor && deposit.depositor !== ethers.ZeroAddress) {
-            // Found deposit in mapping, now get detailed data
-          }
-        } catch (depositsError) {
-          console.warn(`⚠️ Mapping check failed: ${depositsError.message}`);
-        }
-
-        // Method 2: Use getDeposit method for full data (secondary method) - EXACTLY like search-deposit.js
-        try {
-          const depositData = await protocolViewerContract.getDeposit(depositId);
-
-          // Check for deposit data structure exactly like in search-deposit.js
-          if (depositData && depositData.deposit && depositData.deposit.amount) {
-            const contractAmount = BigInt(depositData.deposit.amount).toString();
-            fallbackAmount = contractAmount;
+      // Check if protocolViewerContract is available
+      if (typeof protocolViewerContract !== 'undefined' && protocolViewerContract) {
+        const depositData = await protocolViewerContract.getDeposit(depositId);
+        
+        if (depositData && depositData.deposit && depositData.deposit.amount) {
+          const contractAmount = BigInt(depositData.deposit.amount).toString();
+          if (parseInt(contractAmount) > 0) {
+            depositAmount = contractAmount;
+            amountSource = 'Contract';
             console.log(`✅ Retrieved from contract: ${Utils.convertFromMicrounits(contractAmount)} USDC`);
 
             // Cache in Web3State for future use
             try {
-              // Validate paymentMethod before caching
-              const paymentMethodLower = typeof paymentMethod === 'string' ? paymentMethod.toLowerCase() : '0x0000000000000000000000000000000000000000';
+              const paymentMethodLower = paymentMethod.toLowerCase();
               Web3State.setDepositState(depositId.toString(), {
                 depositAmount: contractAmount,
                 verifierAddress: paymentMethodLower
               });
+              console.log(`✅ Cached deposit amount in Web3State: ${depositId}`);
             } catch (cacheError) {
-              console.error(`❌ Caching error:`, cacheError.message);
+              console.warn(`⚠️ Web3State caching error:`, cacheError.message);
+            }
+
+            // Also store in database for future use
+            try {
+              const dbManager = new DatabaseManager();
+              await dbManager.storeDepositAmount(depositId, contractAmount);
+              console.log(`✅ Stored deposit amount in database: ${depositId}`);
+            } catch (storeError) {
+              console.warn(`⚠️ Database storage error:`, storeError.message);
             }
           }
-        } catch (getDepositError) {
-          console.warn(`⚠️ getDeposit failed: ${getDepositError.message}`);
+        } else {
+          console.warn(`⚠️ No valid deposit data found in contract for ${depositId}`);
         }
+      } else {
+        console.warn(`⚠️ protocolViewerContract not available`);
       }
     } catch (contractError) {
-      console.error(`❌ Contract error:`, contractError.message);
+      console.warn(`⚠️ Contract error for deposit ${depositId}:`, contractError.message);
     }
-
-    // If still no amount, use default fallback
-    if (!fallbackAmount) {
-      fallbackAmount = '1000000'; // Default fallback: 1 USDC
-      console.log(`⚠️ Using default fallback: 1.00 USDC`);
-    }
-
-    depositAmount = fallbackAmount;
   }
+
+  // Final validation and fallback
+  if (!depositAmount || parseInt(depositAmount) <= 0) {
+    console.error(`❌ Could not retrieve deposit amount for ${depositId} from any source (Web3State, Database, Contract)`);
+    console.error(`❌ Event details: PaymentMethod=${paymentMethod}, Currency=${currency}`);
+    return; // Exit early instead of using fallback
+  }
+
+  console.log(`✅ Successfully retrieved deposit amount for ${depositId} from ${amountSource}: ${Utils.convertFromMicrounits(depositAmount)} USDC`);
 
   // Only check sniper opportunities for non-zero currencies
   if (!isZeroAddress(currency)) {
@@ -1023,11 +1076,13 @@ async function handleDepositMinConversionRateUpdated(parsed, log) {
 
     await checkSniperOpportunity(
       depositId,
-      depositAmount,    // ✅ REAL deposit amount from Web3State/contract/database
-      currency,         // ✅ Currency hash
-      minConversionRate, // ✅ Updated minimum conversion rate (equivalent to conversionRate)
-      paymentMethod     // ✅ Payment method (equivalent to verifier)
+      depositAmount,       // ✅ REAL deposit amount from verified source
+      currency,            // ✅ Currency hash
+      minConversionRate,   // ✅ Updated minimum conversion rate
+      paymentMethod        // ✅ Payment method
     );
+  } else {
+    console.log(`⏭️ Skipping sniper check for zero currency address: ${currency}`);
   }
 }
 async function handleDepositWithdrawn(parsed, log) {
@@ -1100,16 +1155,17 @@ async function handleOrchestratorIntentSignaled(parsed, log) {
   const rawIntent = {
     eventType: 'IntentSignaled',
     source: 'orchestrator',
-    intentHash: intentHash.toLowerCase(),
-    escrowAddress: escrow.toLowerCase(),
-    depositId: Number(depositId),
-    paymentMethod: paymentMethod.toLowerCase(),
-    owner: owner.toLowerCase(),
-    to: to.toLowerCase(),
-    amount: amount.toString(),
-    fiatCurrency: fiatCurrency.toLowerCase(),
-    conversionRate: conversionRate.toString(),
-    timestamp: Number(timestamp)
+    intentHash: intentHash?.toLowerCase() || '',
+    escrowAddress: escrow?.toLowerCase() || '',
+    depositId: Number(depositId) || 0,
+    paymentMethod: paymentMethod?.toLowerCase() || '',
+    verifier: paymentMethod?.toLowerCase() || '', // Use paymentMethod as verifier for orchestrator events
+    owner: owner?.toLowerCase() || '',
+    to: to?.toLowerCase() || '',
+    amount: amount?.toString() || '0',
+    fiatCurrency: fiatCurrency?.toLowerCase() || '',
+    conversionRate: conversionRate?.toString() || '0',
+    timestamp: Number(timestamp) || 0
   };
 
   // Store intent data in database for persistence
@@ -1147,29 +1203,6 @@ async function handleOrchestratorIntentFulfilled(parsed, log) {
     timestamp: Math.floor(Date.now() / 1000)
   };
 
-  // Send immediate notification using event data
-  const notificationTxHash = log.transactionHash.toLowerCase();
-  const txHash = log.transactionHash.toLowerCase();
-
-  // Check if there's already a pruned event for this intent in the same transaction
-  const existingTxData = Web3State.getTransactionState(txHash);
-  const hasPrunedEvent = existingTxData?.pruned?.has(intentHash.toLowerCase());
-
-  // Also check if there's a pending pruned event for this intent in the current transaction
-  const allIntentsInTx = Web3State.getAllIntentsForTransaction(txHash);
-  const hasPendingPrunedEvent = Array.from(allIntentsInTx.values()).some(
-    intent => intent.intentHash.toLowerCase() === intentHash.toLowerCase() &&
-    intent.eventType === 'IntentPruned'
-  );
-
-  if (!hasPrunedEvent && !hasPendingPrunedEvent) {
-    const { sendFulfilledNotification } = require('../notifications/telegram-notifications');
-    await sendFulfilledNotification(intentForNotification, notificationTxHash);
-    console.log(`✅ Sent immediate orchestrator fulfilled notification for ${intentHash}`);
-  } else {
-    console.log(`⚠️ Skipping immediate orchestrator fulfilled notification for ${intentHash} - pruned event already exists in transaction ${txHash}`);
-  }
-
   // Store intent data for processing
   const rawIntent = {
     eventType: 'IntentFulfilled',
@@ -1181,19 +1214,28 @@ async function handleOrchestratorIntentFulfilled(parsed, log) {
   };
 
   // Get transaction hash
-  const orchestratorTxHash = log.transactionHash.toLowerCase();
+  const txHash = log.transactionHash.toLowerCase();
 
-  // Add to pending transactions for processing
-  Web3State.setTransactionState(orchestratorTxHash, {
-    txHash: orchestratorTxHash,
-    fulfilled: new Set([intentHash.toLowerCase()]),
-    pruned: new Set(),
-    rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
-    processed: false
-  });
+  // Add to pending transactions for processing (merge with existing data)
+  const currentTxData = Web3State.getTransactionState(txHash);
+  if (currentTxData) {
+    // Merge with existing transaction data
+    currentTxData.fulfilled.add(intentHash.toLowerCase());
+    currentTxData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
+    Web3State.setTransactionState(txHash, currentTxData);
+  } else {
+    // Create new transaction data
+    Web3State.setTransactionState(txHash, {
+      txHash,
+      fulfilled: new Set([intentHash.toLowerCase()]),
+      pruned: new Set(),
+      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
+      processed: false
+    });
+  }
 
   // Schedule processing
-  scheduleTransactionProcessing(orchestratorTxHash);
+  scheduleTransactionProcessing(txHash);
 
   console.log(`📝 Orchestrator IntentFulfilled collected for batching`);
 }
@@ -1203,6 +1245,9 @@ async function handleOrchestratorIntentPruned(parsed, log) {
 
   console.log(`✂️ Orchestrator Intent pruned: ${intentHash}`);
 
+  // Get transaction hash
+  const txHash = log.transactionHash.toLowerCase();
+
   // Store intent data for processing
   const rawIntent = {
     eventType: 'IntentPruned',
@@ -1211,17 +1256,23 @@ async function handleOrchestratorIntentPruned(parsed, log) {
     timestamp: Math.floor(Date.now() / 1000)
   };
 
-  // Get transaction hash
-  const txHash = log.transactionHash.toLowerCase();
-
-  // Add to pending transactions for processing
-  Web3State.setTransactionState(txHash, {
-    txHash,
-    fulfilled: new Set(),
-    pruned: new Set([intentHash.toLowerCase()]),
-    rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
-    processed: false
-  });
+  // Add to pending transactions for processing (merge with existing data)
+  const currentTxData = Web3State.getTransactionState(txHash);
+  if (currentTxData) {
+    // Merge with existing transaction data
+    currentTxData.pruned.add(intentHash.toLowerCase());
+    currentTxData.rawIntents.set(intentHash.toLowerCase(), rawIntent);
+    Web3State.setTransactionState(txHash, currentTxData);
+  } else {
+    // Create new transaction data
+    Web3State.setTransactionState(txHash, {
+      txHash,
+      fulfilled: new Set(),
+      pruned: new Set([intentHash.toLowerCase()]),
+      rawIntents: new Map([[intentHash.toLowerCase(), rawIntent]]),
+      processed: false
+    });
+  }
 
   // Schedule processing
   scheduleTransactionProcessing(txHash);
@@ -1558,7 +1609,6 @@ async function handleMinDepositAmountSet(parsed, log) {
 }
 
 module.exports = {
-  handleContractEvent,
   handleDepositCurrencyAdded,
   handleDepositConversionRateUpdated,
   handleDepositReceived,
@@ -1602,6 +1652,8 @@ module.exports = {
   handleOrchestratorIntentSignaled,
   handleOrchestratorIntentFulfilled,
   handleOrchestratorIntentPruned,
-  // Main orchestrator handler
-  handleOrchestratorEvent
+  // Main orchestrator handler (legacy - should not be used)
+  handleOrchestratorEvent,
+  // Main unified event handler
+  handleContractEvent
 };
